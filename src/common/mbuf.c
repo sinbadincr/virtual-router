@@ -38,6 +38,7 @@ struct mbuf *mbuf_alloc(void) {
     free_head = m->next;
     m->next = NULL;
     m->off = MBUF_HEADROOM;
+    m->inner_off = 0;
     m->len = 0;
     m->in_port = MBUF_NO_PORT;
     m->allocated = 1;

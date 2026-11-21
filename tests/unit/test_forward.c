@@ -458,13 +458,149 @@ TEST(echo_to_a_gateway_is_answered_in_its_own_vrf) {
     ov_teardown();
 }
 
-TEST(a_frame_on_the_underlay_port_is_dropped_until_decap_exists) {
+TEST(only_non_tunnel_non_arp_non_echo_frames_on_the_underlay_are_unexpected) {
     vrf_setup();
     uint8_t fr[256];
-    size_t n = make_echo(fr, OV_UL_MAC1, OV_UL_MAC2, IP4(172, 16, 0, 2), IP4(172, 16, 0, 1), 64, ICMP_ECHO_REQUEST, 1, 1);
-    ov_rx("u0", fr, n);
+    uint8_t seg[8] = {0};
+    size_t n = make_ipv4(fr, OV_UL_MAC1, OV_UL_MAC2, IP4(172, 16, 0, 2), IP4(172, 16, 0, 1), 64, 6, seg, sizeof seg);
+    ov_rx("u0", fr, n); /* TCP */
     CHECK_EQ_U64(g_stats.reasons[DROP_UNDERLAY_UNEXPECTED], 1);
+    n = make_echo(fr, OV_UL_MAC1, OV_UL_MAC2, IP4(172, 16, 0, 2), IP4(172, 16, 0, 1), 64, ICMP_ECHO_REQUEST, 1, 1);
+    ov_rx("u0", fr, n); /* echo to the underlay address: answered, no drop */
+    CHECK_EQ_U64(g_stats.reasons[DROP_UNDERLAY_UNEXPECTED], 1);
+    CHECK_EQ_U64(ov_tx_count("u0"), 1);
     check_invariants();
     CHECK_EQ_U64(mbuf_in_use(), 0);
+    ov_teardown();
+}
+
+/* ---- two-node round trip (phase 2): cn1 encapsulates, the captured frame is injected into cn2 ---- */
+
+static uint8_t wire[2048];
+static size_t wire_len;
+
+/* Send a ping from `vm` on cn1 and capture the frame cn1 puts on its underlay (resolving cn2's
+ * MAC through a real ARP exchange first). */
+static void cn1_sends(const char *port, int pidx, const uint8_t *vmmac, uint32_t dst) {
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    uint8_t pm[6], fr[128];
+    ov_port_mac(pm, 1, pidx);
+    size_t n = make_echo(fr, pm, vmmac, IP4(10, 1, 1, 11), dst, 64, ICMP_ECHO_REQUEST, 7, 1);
+    ov_rx(port, fr, n);
+    uint8_t rep[64];
+    make_arp_reply(rep, OV_UL_MAC1, OV_UL_MAC2, IP4(172, 16, 0, 2), IP4(172, 16, 0, 1));
+    ov_clear_tx();
+    ov_rx("u0", rep, ARP_FRAME_LEN); /* releases the held, already encapsulated packet */
+    CHECK_EQ_U64(ov_tx_count("u0"), 1);
+    const uint8_t *o = ov_tx("u0", 0, &wire_len);
+    CHECK(wire_len > 0 && wire_len <= sizeof wire);
+    memcpy(wire, o, wire_len);
+    ov_teardown();
+}
+
+TEST(round_trip_red_mplsoudp_to_red2) {
+    cn1_sends("red1", 1, OV_RED1, IP4(10, 1, 1, 12));
+    CHECK_EQ_U64(ov_setup(2, 1600), 0);
+    ov_rx("u0", wire, wire_len);
+    CHECK_EQ_U64(ov_tx_count("red2"), 1);
+    size_t len;
+    const uint8_t *o = ov_tx("red2", 0, &len);
+    CHECK_MEM_EQ(o, OV_RED2, 6);
+    CHECK_EQ_U64(o[ETH_HDR_LEN + 8], 63); /* one routed hop */
+    CHECK_EQ_U64(rd32(o + ETH_HDR_LEN + 12), IP4(10, 1, 1, 11));
+    CHECK_EQ_U64(rd32(o + ETH_HDR_LEN + 16), IP4(10, 1, 1, 12));
+    CHECK_EQ_U64(pkt_csum16(o + ETH_HDR_LEN, IPV4_HDR_LEN), 0);
+    CHECK_EQ_U64(g_stats.drop_total, 0);
+    ov_teardown();
+}
+
+TEST(round_trip_blue_vxlan_to_blue2) {
+    cn1_sends("blue1", 2, OV_BLUE1, IP4(10, 1, 1, 12));
+    CHECK_EQ_U64(ov_setup(2, 1600), 0);
+    ov_rx("u0", wire, wire_len);
+    CHECK_EQ_U64(ov_tx_count("blue2"), 1);
+    CHECK_EQ_U64(ov_tx_count("red2"), 0); /* same destination address, other tenant: not delivered */
+    size_t len;
+    const uint8_t *o = ov_tx("blue2", 0, &len);
+    CHECK_MEM_EQ(o, OV_BLUE2, 6);
+    CHECK_EQ_U64(o[ETH_HDR_LEN + 8], 63);
+    ov_teardown();
+}
+
+TEST(round_trip_red_to_the_second_red_vm_on_cn2) {
+    cn1_sends("red1", 1, OV_RED1, IP4(10, 1, 2, 13));
+    CHECK_EQ_U64(ov_setup(2, 1600), 0);
+    ov_rx("u0", wire, wire_len);
+    CHECK_EQ_U64(ov_tx_count("red3"), 1);
+    CHECK_EQ_U64(ov_tx_count("red2"), 0);
+    size_t len;
+    CHECK_MEM_EQ(ov_tx("red3", 0, &len), OV_RED3, 6);
+    ov_teardown();
+}
+
+TEST(reply_direction_cn2_to_cn1_for_both_encapsulations) {
+    CHECK_EQ_U64(ov_setup(2, 1600), 0);
+    neigh_learn(IP4(172, 16, 0, 1), OV_UL_MAC1, port_underlay()->id);
+    uint8_t pm[6], fr[128];
+    ov_port_mac(pm, 2, 1);
+    size_t n = make_echo(fr, pm, OV_RED2, IP4(10, 1, 1, 12), IP4(10, 1, 1, 11), 64, ICMP_ECHO_REPLY, 7, 1);
+    ov_rx("red2", fr, n);
+    ov_port_mac(pm, 2, 3);
+    n = make_echo(fr, pm, OV_BLUE2, IP4(10, 1, 1, 12), IP4(10, 1, 1, 11), 64, ICMP_ECHO_REPLY, 7, 1);
+    ov_rx("blue2", fr, n);
+    CHECK_EQ_U64(ov_tx_count("u0"), 2);
+    uint8_t w0[256], w1[256];
+    size_t l0, l1;
+    const uint8_t *t0 = ov_tx("u0", 0, &l0); /* (a separate statement: the length is an output) */
+    memcpy(w0, t0, l0);
+    const uint8_t *t1 = ov_tx("u0", 1, &l1);
+    memcpy(w1, t1, l1);
+    ov_teardown();
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    ov_rx("u0", w0, l0);
+    ov_rx("u0", w1, l1);
+    CHECK_EQ_U64(ov_tx_count("red1"), 1);
+    CHECK_EQ_U64(ov_tx_count("blue1"), 1);
+    size_t len;
+    CHECK_EQ_U64(ov_tx("red1", 0, &len)[ETH_HDR_LEN + 8], 63);
+    CHECK_EQ_U64(ov_tx("blue1", 0, &len)[ETH_HDR_LEN + 8], 63);
+    ov_teardown();
+}
+
+/* ---- proxy ARP for VMs on another node (research R7) ---- */
+
+TEST(proxy_arp_answers_only_for_slash32_remote_routes_of_the_ingress_vrf) {
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    uint8_t a[64], pm[6];
+    ov_port_mac(pm, 1, 1);
+    size_t len;
+    /* red1 asks for red2's address, which lives on cn2 */
+    ov_rx("red1", a, make_arp_request(a, OV_RED1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 12)));
+    CHECK_EQ_U64(ov_tx_count("red1"), 1);
+    const uint8_t *r = ov_tx("red1", 0, &len);
+    CHECK_EQ_U64(rd16(r + 20), ARP_OP_REPLY);
+    CHECK_MEM_EQ(r + 22, pm, 6); /* the port's MAC stands in for the remote VM */
+    ov_clear_tx();
+    /* an address nobody has */
+    ov_rx("red1", a, make_arp_request(a, OV_RED1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 99)));
+    CHECK_EQ_U64(ov_tx_count("red1"), 0);
+    CHECK_EQ_U64(g_stats.reasons[DROP_ARP_UNKNOWN_TARGET], 1);
+    /* blue: its own remote /32 is answered, red's red3 address is not (red only) */
+    ov_rx("blue1", a, make_arp_request(a, OV_BLUE1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 12)));
+    CHECK_EQ_U64(ov_tx_count("blue1"), 1);
+    ov_clear_tx();
+    ov_rx("blue1", a, make_arp_request(a, OV_BLUE1, IP4(10, 1, 1, 11), IP4(10, 1, 2, 13)));
+    CHECK_EQ_U64(ov_tx_count("blue1"), 0);
+    CHECK_EQ_U64(g_stats.reasons[DROP_ARP_UNKNOWN_TARGET], 2);
+    ov_teardown();
+}
+
+TEST(a_wider_remote_prefix_is_not_proxy_arped) {
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    struct cmd_err e;
+    CHECK(ov_cmd(CMD_CLI, "route add 10.50.0.0/16 vrf red node cn2 encap mplsoudp label 1500", &e) == 0);
+    uint8_t a[64];
+    ov_rx("red1", a, make_arp_request(a, OV_RED1, IP4(10, 1, 1, 11), IP4(10, 50, 1, 1)));
+    CHECK_EQ_U64(ov_tx_count("red1"), 0);
     ov_teardown();
 }

@@ -36,7 +36,7 @@ static void tx_flush(uint8_t id) {
         g_stats.port[id].tx_bytes += lens[i];
 }
 
-static void tx_enqueue(uint8_t id, struct mbuf *m) {
+void fwd_tx_enqueue(uint8_t id, struct mbuf *m) {
     struct txq *q = &txq[id];
     if (q->n == PIO_BURST)
         tx_flush(id);
@@ -49,16 +49,16 @@ static void flush_all(void) {
             tx_flush((uint8_t)i);
 }
 
-static void drop(const struct port *in, struct mbuf *m, enum drop_reason r) {
+void fwd_drop(const struct port *in, struct mbuf *m, enum drop_reason r) {
     stats_drop_port(in->id, r);
     mbuf_free(m);
 }
+#define drop fwd_drop
 
-/* ICMP error back to the sender, gated by the ingress port's token bucket. */
-static void send_icmp_error(struct port *in, const struct mbuf *orig, uint8_t type, uint8_t code,
-                            uint16_t mtu) {
-    const uint8_t *f = mbuf_data((struct mbuf *)orig);
-    if (!pkt_icmp_error_allowed(f, orig->len))
+/* ICMP error back to the sender of frame `f` (len bytes), gated by the ingress port's bucket. */
+static void send_icmp_error_buf(struct port *in, const uint8_t *f, size_t len, uint8_t type,
+                                uint8_t code, uint16_t mtu) {
+    if (!pkt_icmp_error_allowed(f, len))
         return;
     if (!tb_take(&in->icmp_bucket, clock_now_ns())) {
         g_stats.icmp_ratelimited++;
@@ -67,18 +67,23 @@ static void send_icmp_error(struct port *in, const struct mbuf *orig, uint8_t ty
     struct mbuf *e = mbuf_alloc();
     if (!e)
         return;
-    e->len = (uint16_t)pkt_icmp_build_error(mbuf_data(e), f, orig->len, in->mac, in->ip, type, code,
-                                            mtu);
+    e->len = (uint16_t)pkt_icmp_build_error(mbuf_data(e), f, len, in->mac, in->ip, type, code, mtu);
     g_stats.icmp_sent++;
-    tx_enqueue(in->id, e);
+    fwd_tx_enqueue(in->id, e);
 }
+
+void fwd_send_icmp_error(struct port *in, const struct mbuf *orig, uint8_t type, uint8_t code,
+                         uint16_t mtu) {
+    send_icmp_error_buf(in, mbuf_data((struct mbuf *)orig), orig->len, type, code, mtu);
+}
+#define send_icmp_error fwd_send_icmp_error
 
 void fwd_tx_now(uint8_t port, struct mbuf *m) {
     if (!port_get(port)) {
         mbuf_free(m);
         return;
     }
-    tx_enqueue(port, m);
+    fwd_tx_enqueue(port, m);
     tx_flush(port);
 }
 
@@ -98,7 +103,22 @@ void fwd_icmp_host_unreach(const struct mbuf *held) {
     struct port *in = port_get(held->in_port);
     if (!in)
         return;
-    send_icmp_error(in, held, ICMP_UNREACH, ICMP_UNREACH_HOST, 0);
+    if (held->inner_off) {
+        /* an encapsulated packet: rebuild the tenant frame the error must quote (source MAC of
+         * the original frame + inner IPv4 header and first 8 payload bytes) */
+        uint8_t orig[ETH_HDR_LEN + IPV4_HDR_LEN + 8];
+        const uint8_t *inner = mbuf_data((struct mbuf *)held) + held->inner_off;
+        size_t avail = held->len - held->inner_off, n = IPV4_HDR_LEN + 8;
+        if (avail < n)
+            n = avail;
+        memset(orig, 0, sizeof orig);
+        memcpy(orig + 6, held->src_mac, ETH_ALEN);
+        wr16(orig + 12, ETHERTYPE_IPV4);
+        memcpy(orig + ETH_HDR_LEN, inner, n);
+        send_icmp_error_buf(in, orig, ETH_HDR_LEN + n, ICMP_UNREACH, ICMP_UNREACH_HOST, 0);
+    } else {
+        send_icmp_error(in, held, ICMP_UNREACH, ICMP_UNREACH_HOST, 0);
+    }
     tx_flush(in->id);
 }
 
@@ -124,11 +144,15 @@ static void handle_arp(struct port *in, struct mbuf *m) {
         return;
     }
     const struct neigh *n = neigh_lookup(in->vrf, a.tpa);
-    if (a.tpa == in->ip || (n && n->state == NEIGH_REACHABLE)) {
+    /* proxy ARP for a VM that lives on another compute node: a /32 REMOTE route in this VRF
+     * (research R7); wider remote prefixes are not answered for */
+    const struct route *rr = route_lookup(in->vrf, a.tpa);
+    int remote_vm = rr && rr->kind == NH_REMOTE && rr->len == 32;
+    if (a.tpa == in->ip || (n && n->state == NEIGH_REACHABLE) || remote_vm) {
         pkt_arp_make_reply(f, in->mac);
         m->len = ARP_FRAME_LEN;
         g_stats.arp_replies_sent++;
-        tx_enqueue(in->id, m);
+        fwd_tx_enqueue(in->id, m);
         return;
     }
     drop(in, m, DROP_ARP_UNKNOWN_TARGET);
@@ -153,7 +177,7 @@ static void handle_ipv4(struct port *in, struct mbuf *m) {
                 return;
             }
             memcpy(f + 6, in->mac, ETH_ALEN);
-            tx_enqueue(in->id, m);
+            fwd_tx_enqueue(in->id, m);
             return;
         }
         drop(in, m, DROP_LOCAL_UNSUPPORTED);
@@ -170,8 +194,8 @@ static void handle_ipv4(struct port *in, struct mbuf *m) {
         drop(in, m, DROP_NO_ROUTE);
         return;
     }
-    if (r->kind == NH_REMOTE) { /* tunnel transmit path: encap.c (US2) */
-        drop(in, m, DROP_NO_ROUTE);
+    if (r->kind == NH_REMOTE) { /* tunnel transmit path */
+        encap_tx(in, m, r);
         return;
     }
     if (r->port == ROUTE_NO_PORT) { /* multi-port subnet without a /32 for this host */
@@ -197,7 +221,7 @@ static void handle_ipv4(struct port *in, struct mbuf *m) {
     case NEIGH_OK:
         memcpy(f, mac, ETH_ALEN);
         memcpy(f + 6, eg->mac, ETH_ALEN);
-        tx_enqueue(eg->id, m);
+        fwd_tx_enqueue(eg->id, m);
         return;
     case NEIGH_HELD:
         return;
@@ -220,6 +244,9 @@ void forward_burst(struct port *in, struct mbuf **m, int n) {
         enum drop_reason why;
         enum eth_class c = pkt_eth_classify(f, b->len, in->mac, &why);
         if (c == ETH_C_DROP) {
+            /* on the underlay a non-IPv4/ARP EtherType is unexpected traffic (FR-017) */
+            if (in->role == PORT_UNDERLAY && why == DROP_UNSUPPORTED_ETHERTYPE)
+                why = DROP_UNDERLAY_UNEXPECTED;
             drop(in, b, why);
             continue;
         }
@@ -227,8 +254,8 @@ void forward_burst(struct port *in, struct mbuf **m, int n) {
             drop(in, b, DROP_UNSUPPORTED_ETHERTYPE);
             continue;
         }
-        if (in->role == PORT_UNDERLAY) { /* decap.c (US2) takes over; until then nothing is tunnelled */
-            drop(in, b, DROP_UNDERLAY_UNEXPECTED);
+        if (in->role == PORT_UNDERLAY) {
+            decap_rx(in, b, c);
             continue;
         }
         if (!antispoof_ok(in, c, f, b->len)) {
