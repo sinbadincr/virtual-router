@@ -40,15 +40,20 @@ lab_mode() {
 }
 lab_kind() { lab_mode; }
 
-kind_label() {
-  case "$1" in kvm) echo KVM ;; harness) echo "namespace test harness" ;; *) echo "$1" ;; esac
+# the single-node messages are the 004 strings (the phase 1 suites assert them verbatim)
+kind_message() {
+  case "$1" in
+    kvm) echo "KVM lab is up" ;;
+    harness) echo "namespace test harness is up" ;;
+    *) echo "$1 lab is up" ;;
+  esac
 }
 # Exactly one lab kind at a time: refuse (exit 1) when another kind is up.
 refuse_other_kind() { # wanted-kind
   local cur
   cur=$(lab_mode)
   if [ "$cur" != none ] && [ "$cur" != "$1" ]; then
-    die "$(kind_label "$cur") lab is up; run 'sudo make lab-clean' first"
+    die "$(kind_message "$cur"); run 'sudo make lab-clean' first"
   fi
 }
 

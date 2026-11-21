@@ -33,7 +33,7 @@ def test_single_node_labs_refuse_while_overlay_is_down_kind_changes():
         assert run_lab("up", "--harness").returncode == 0
         r = run_lab(*lab_args())
         assert r.returncode == 1
-        assert "namespace test harness lab is up; run 'sudo make lab-clean' first" in r.stderr, r.stderr
+        assert "namespace test harness is up; run 'sudo make lab-clean' first" in r.stderr, r.stderr
         assert "mvr-cn2" not in mvr_ns()
     finally:
         run_lab("down")
