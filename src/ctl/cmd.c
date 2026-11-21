@@ -12,6 +12,8 @@
 #include "minivr/ratelimit.h"
 #include "minivr/route.h"
 #include "minivr/stats.h"
+#include "minivr/tunnel.h"
+#include "minivr/vrf.h"
 
 #define MINIVR_VERSION "0.1.0"
 #define PROTOCOL_VERSION 1
@@ -172,19 +174,57 @@ static int usage(struct cmd_ctx *c, const char *u) {
     return cmd_fail(c->err, "bad-syntax", "usage: %s", u);
 }
 
-static int cmd_port_add(struct cmd_ctx *c, int argc, char **argv) {
-    /* port add <name> ifname <if> ip <a.b.c.d/len> */
-    static const char *u = "port add <name> ifname <if> ip <a.b.c.d/len>";
-    if (argc != 7 || strcmp(argv[3], "ifname") != 0 || strcmp(argv[5], "ip") != 0)
+static int resolve_vrf(struct cmd_ctx *c, const char *name, unsigned *id) {
+    const struct vrf *v = vrf_by_name(name);
+    if (!v)
+        return cmd_fail(c->err, "unknown-vrf", "no such VRF '%s'", name);
+    *id = v->id;
+    return 0;
+}
+
+static int cmd_vrf_add(struct cmd_ctx *c, int argc, char **argv) {
+    static const char *u = "vrf add <name> id <1-63>";
+    if (argc != 5 || strcmp(argv[3], "id") != 0)
+        return usage(c, u);
+    uint64_t id;
+    const char *e = cmd_parse_uint(argv[4], 0, 1000, &id);
+    if (e)
+        return cmd_fail(c->err, e, "VRF id must be a number 1..%d", VRF_MAX - 1);
+    return vrf_add(argv[2], (unsigned)id, c->err);
+}
+
+static int cmd_vrf_del(struct cmd_ctx *c, int argc, char **argv) {
+    if (argc != 3)
+        return usage(c, "vrf del <name>");
+    return vrf_del(argv[2], c->err);
+}
+
+static int add_port(struct cmd_ctx *c, int argc, char **argv, enum port_role role) {
+    /* port add <name> ifname <if> ip <a.b.c.d/len> [vrf <v>]    underlay add: no vrf */
+    static const char *u_port = "port add <name> ifname <if> ip <a.b.c.d/len> [vrf <vrf>]";
+    static const char *u_ul = "underlay add <name> ifname <if> ip <a.b.c.d/len>";
+    const char *u = role == PORT_VM ? u_port : u_ul;
+    int base = role == PORT_VM ? 7 : 7;
+    if ((argc != base && !(role == PORT_VM && argc == 9)) || strcmp(argv[3], "ifname") != 0 ||
+        strcmp(argv[5], "ip") != 0 || (argc == 9 && strcmp(argv[7], "vrf") != 0))
         return usage(c, u);
     uint32_t ip;
     uint8_t len;
     const char *e = parse_cidr(argv[6], &ip, &len, 1);
     if (e)
         return cmd_fail(c->err, e, "invalid interface address '%s'", argv[6]);
-    if (!port_add(argv[2], argv[4], ip, len, c->err))
+    unsigned vrf = VRF_DEFAULT;
+    if (argc == 9 && resolve_vrf(c, argv[8], &vrf) != 0)
         return -1;
-    return 0;
+    return port_add(argv[2], argv[4], ip, len, role, vrf, c->err) ? 0 : -1;
+}
+
+static int cmd_port_add(struct cmd_ctx *c, int argc, char **argv) {
+    return add_port(c, argc, argv, PORT_VM);
+}
+
+static int cmd_underlay_add(struct cmd_ctx *c, int argc, char **argv) {
+    return add_port(c, argc, argv, PORT_UNDERLAY);
 }
 
 static int cmd_neigh_add(struct cmd_ctx *c, int argc, char **argv) {
@@ -204,22 +244,88 @@ static int cmd_neigh_add(struct cmd_ctx *c, int argc, char **argv) {
     return neigh_add_static(ip, mac, p->id, c->err);
 }
 
-static int cmd_route_add(struct cmd_ctx *c, int argc, char **argv) {
-    static const char *u = "route add <prefix> dev <port> [via <gw>]";
-    if ((argc != 5 && argc != 7) || strcmp(argv[3], "dev") != 0 ||
-        (argc == 7 && strcmp(argv[5], "via") != 0))
+/* route add|replace <prefix> [vrf <v>] (dev <p> [via <gw>] | node <n> encap mplsoudp label <l>
+ * | node <n> encap vxlan vni <id>) */
+static int route_add_or_replace(struct cmd_ctx *c, int argc, char **argv, int replace) {
+    static const char *u =
+        "route add|replace <prefix> [vrf <vrf>] dev <port> [via <gw>] | node <node> encap "
+        "mplsoudp label <l> | node <node> encap vxlan vni <id>";
+    if (argc < 5)
         return usage(c, u);
     uint32_t prefix, gw = 0;
     uint8_t len;
     const char *e = cmd_parse_prefix(argv[2], &prefix, &len);
     if (e)
         return cmd_fail(c->err, e, "invalid prefix '%s' (host bits must be zero)", argv[2]);
-    struct port *p = port_find(argv[4]);
-    if (!p)
-        return cmd_fail(c->err, "unknown-port", "no such port '%s'", argv[4]);
-    if (argc == 7 && (e = cmd_parse_ipv4(argv[6], &gw)))
-        return cmd_fail(c->err, e, "invalid gateway '%s'", argv[6]);
-    return route_add_static(prefix, len, p->id, gw, c->err);
+    const char *dev = NULL, *via = NULL, *node = NULL, *encap = NULL, *label = NULL, *vni = NULL;
+    unsigned vrf = VRF_DEFAULT;
+    for (int i = 3; i < argc; i += 2) {
+        if (i + 1 >= argc)
+            return usage(c, u);
+        const char *k = argv[i], *v = argv[i + 1];
+        if (strcmp(k, "vrf") == 0) {
+            if (resolve_vrf(c, v, &vrf) != 0)
+                return -1;
+        } else if (strcmp(k, "dev") == 0 && !dev) {
+            dev = v;
+        } else if (strcmp(k, "via") == 0 && !via) {
+            via = v;
+        } else if (strcmp(k, "node") == 0 && !node) {
+            node = v;
+        } else if (strcmp(k, "encap") == 0 && !encap) {
+            encap = v;
+        } else if (strcmp(k, "label") == 0 && !label) {
+            label = v;
+        } else if (strcmp(k, "vni") == 0 && !vni) {
+            vni = v;
+        } else {
+            return usage(c, u);
+        }
+    }
+    if (dev) { /* local */
+        if (node || encap || label || vni)
+            return usage(c, u);
+        struct port *p = port_find(dev);
+        if (!p)
+            return cmd_fail(c->err, "unknown-port", "no such port '%s'", dev);
+        if (via && (e = cmd_parse_ipv4(via, &gw)))
+            return cmd_fail(c->err, e, "invalid gateway '%s'", via);
+        return replace ? route_replace_static(vrf, prefix, len, p->id, gw, c->err)
+                       : route_add_static(vrf, prefix, len, p->id, gw, c->err);
+    }
+    if (!node || !encap || via)
+        return usage(c, u);
+    const struct node *n = node_find(node);
+    uint64_t tag;
+    enum encap_kind kind;
+    if (strcmp(encap, "mplsoudp") == 0 && label && !vni) {
+        kind = ENCAP_MPLSOUDP;
+        if ((e = cmd_parse_uint(label, 0, 0xffffffffu, &tag)))
+            return cmd_fail(c->err, e, "label must be %d..%d", MPLS_LABEL_MIN, MPLS_LABEL_MAX);
+    } else if (strcmp(encap, "vxlan") == 0 && vni && !label) {
+        kind = ENCAP_VXLAN;
+        if ((e = cmd_parse_uint(vni, 0, 0xffffffffu, &tag)))
+            return cmd_fail(c->err, e, "VNI must be %d..%d", VNI_MIN, VNI_MAX);
+    } else {
+        return usage(c, u);
+    }
+    if (!n) {
+        if (!vrf_by_id(vrf))
+            return cmd_fail(c->err, "unknown-vrf", "no such VRF");
+        if (!port_underlay())
+            return cmd_fail(c->err, "no-underlay", "no underlay port is configured");
+        return cmd_fail(c->err, "unknown-node", "no such node '%s'", node);
+    }
+    return replace ? route_replace_remote(vrf, prefix, len, n->id, kind, (uint32_t)tag, c->err)
+                   : route_add_remote(vrf, prefix, len, n->id, kind, (uint32_t)tag, c->err);
+}
+
+static int cmd_route_add(struct cmd_ctx *c, int argc, char **argv) {
+    return route_add_or_replace(c, argc, argv, 0);
+}
+
+static int cmd_route_replace(struct cmd_ctx *c, int argc, char **argv) {
+    return route_add_or_replace(c, argc, argv, 1);
 }
 
 static int cmd_icmp_ratelimit(struct cmd_ctx *c, int argc, char **argv) {
@@ -256,7 +362,20 @@ static void json_route(struct jw *w, const char *key, const struct route *r) {
     char b[20], g[16];
     jw_obj_begin(w, key);
     prefix_str(r->prefix, r->len, b);
+    const struct vrf *v = vrf_by_id(r->vrf);
+    jw_str(w, "vrf", v ? v->name : "?");
     jw_str(w, "prefix", b);
+    if (r->kind == NH_REMOTE) {
+        const struct node *n = node_get(r->node);
+        jw_null(w, "port");
+        jw_null(w, "gateway");
+        jw_str(w, "origin", route_origin_name(r->origin));
+        jw_str(w, "node", n ? n->name : "?");
+        jw_str(w, "encap", stats_encap_name(r->encap));
+        jw_u64(w, "tag", r->tag);
+        jw_obj_end(w);
+        return;
+    }
     struct port *p = r->port == ROUTE_NO_PORT ? NULL : port_get((uint8_t)r->port);
     if (p)
         jw_str(w, "port", p->name);
@@ -280,12 +399,12 @@ struct page {
     int more; /* an entry exists beyond this page */
 };
 
-/* "[offset <n>] [limit <n>]" starting at argv[2]. */
-static int parse_page(struct cmd_ctx *c, int argc, char **argv, const char *usage_line,
+/* "[offset <n>] [limit <n>]" starting at argv[first]. */
+static int parse_page(struct cmd_ctx *c, int argc, char **argv, int first, const char *usage_line,
                       uint64_t *offset, uint64_t *limit) {
     *offset = 0;
     *limit = SHOW_DEFAULT_LIMIT;
-    for (int i = 2; i < argc; i += 2) {
+    for (int i = first; i < argc; i += 2) {
         if (i + 1 >= argc)
             return usage(c, usage_line);
         uint64_t *dst = strcmp(argv[i], "offset") == 0  ? offset
@@ -326,37 +445,59 @@ static void route_show_cb(const struct route *r, void *arg) {
     json_route(pg->w, NULL, r);
 }
 
+/* Optional "vrf <name>" at argv[from]; returns the next index or -1 on error. */
+static int opt_vrf(struct cmd_ctx *c, int argc, char **argv, int from, unsigned *vrf) {
+    *vrf = VRF_DEFAULT;
+    if (from + 1 < argc && strcmp(argv[from], "vrf") == 0) {
+        if (resolve_vrf(c, argv[from + 1], vrf) != 0)
+            return -1;
+        return from + 2;
+    }
+    return from;
+}
+
 static int cmd_route_show(struct cmd_ctx *c, int argc, char **argv) {
+    static const char *u = "route show [vrf <vrf>] [offset <n>] [limit <n>]";
     struct page pg = {.w = c->out};
-    if (parse_page(c, argc, argv, "route show [offset <n>] [limit <n>]", &pg.offset, &pg.limit))
+    unsigned vrf;
+    int first = opt_vrf(c, argc, argv, 2, &vrf);
+    if (first < 0 || parse_page(c, argc, argv, first, u, &pg.offset, &pg.limit))
         return -1;
-    page_header(&pg, route_count());
+    page_header(&pg, route_count_vrf(vrf));
     jw_arr_begin(c->out, "routes");
-    route_walk(route_show_cb, &pg);
+    route_walk(vrf, route_show_cb, &pg);
     jw_arr_end(c->out);
     page_footer(&pg);
     return 0;
 }
 
 static int cmd_route_del(struct cmd_ctx *c, int argc, char **argv) {
-    if (argc != 3)
-        return usage(c, "route del <prefix>");
+    static const char *u = "route del <prefix> [vrf <vrf>]";
+    if (argc != 3 && argc != 5)
+        return usage(c, u);
     uint32_t prefix;
     uint8_t len;
     const char *e = cmd_parse_prefix(argv[2], &prefix, &len);
     if (e)
         return cmd_fail(c->err, e, "invalid prefix '%s' (host bits must be zero)", argv[2]);
-    return route_del(prefix, len, c->err);
+    unsigned vrf;
+    if (opt_vrf(c, argc, argv, 3, &vrf) != argc)
+        return argc == 5 && !vrf_by_name(argv[4]) ? -1 : usage(c, u);
+    return route_del(vrf, prefix, len, c->err);
 }
 
 static int cmd_route_lookup(struct cmd_ctx *c, int argc, char **argv) {
-    if (argc != 3)
-        return usage(c, "route lookup <ip>");
+    static const char *u = "route lookup <ip> [vrf <vrf>]";
+    if (argc != 3 && argc != 5)
+        return usage(c, u);
     uint32_t ip;
     const char *e = cmd_parse_ipv4(argv[2], &ip);
     if (e)
         return cmd_fail(c->err, e, "invalid address '%s'", argv[2]);
-    const struct route *r = route_lookup(ip);
+    unsigned vrf;
+    if (opt_vrf(c, argc, argv, 3, &vrf) != argc)
+        return argc == 5 && !vrf_by_name(argv[4]) ? -1 : usage(c, u);
+    const struct route *r = route_lookup(vrf, ip);
     if (!r)
         return cmd_fail(c->err, "not-found", "no route to %s", argv[2]);
     json_route(c->out, "route", r);
@@ -379,6 +520,13 @@ static int cmd_port_show(struct cmd_ctx *c, int argc, char **argv) {
         jw_obj_begin(c->out, NULL);
         jw_str(c->out, "name", p->name);
         jw_str(c->out, "ifname", p->ifname);
+        jw_str(c->out, "role", p->role == PORT_UNDERLAY ? "underlay" : "vm");
+        if (p->role == PORT_VM) {
+            const struct vrf *v = vrf_by_id(p->vrf);
+            jw_str(c->out, "vrf", v ? v->name : "?");
+        } else {
+            jw_null(c->out, "vrf");
+        }
         jw_str(c->out, "mac", mac);
         jw_str(c->out, "ip", ip);
         jw_u64(c->out, "mtu", p->mtu);
@@ -396,12 +544,20 @@ static int cmd_port_show(struct cmd_ctx *c, int argc, char **argv) {
 }
 
 static int cmd_port_set(struct cmd_ctx *c, int argc, char **argv) {
-    static const char *u = "port set <name> admin up|down";
-    if (argc != 5 || strcmp(argv[3], "admin") != 0)
+    static const char *u = "port set <name> admin up|down | vrf <vrf>";
+    if (argc != 5)
         return usage(c, u);
     struct port *p = port_find(argv[2]);
     if (!p)
         return cmd_fail(c->err, "unknown-port", "no such port '%s'", argv[2]);
+    if (strcmp(argv[3], "vrf") == 0) {
+        unsigned vrf;
+        if (resolve_vrf(c, argv[4], &vrf) != 0)
+            return -1;
+        return port_set_vrf(p, vrf, c->err);
+    }
+    if (strcmp(argv[3], "admin") != 0)
+        return usage(c, u);
     if (strcmp(argv[4], "up") == 0) {
         p->admin_up = true;
     } else if (strcmp(argv[4], "down") == 0) {
@@ -419,9 +575,12 @@ struct neigh_row {
 };
 static struct neigh_row rows[NEIGH_CAPACITY];
 static unsigned nrows;
+static int row_table; /* -1 = every table */
 
 static void neigh_collect(const struct neigh *n, void *arg) {
     (void)arg;
+    if (row_table >= 0 && n->table != row_table)
+        return;
     if (nrows < NEIGH_CAPACITY) {
         rows[nrows].ip = n->ip;
         rows[nrows].n = n;
@@ -430,13 +589,28 @@ static void neigh_collect(const struct neigh *n, void *arg) {
 }
 
 static int row_cmp(const void *a, const void *b) {
-    uint32_t x = ((const struct neigh_row *)a)->ip, y = ((const struct neigh_row *)b)->ip;
-    return x < y ? -1 : x > y;
+    const struct neigh *p = ((const struct neigh_row *)a)->n, *q = ((const struct neigh_row *)b)->n;
+    if (p->table != q->table)
+        return p->table < q->table ? -1 : 1;
+    return p->ip < q->ip ? -1 : p->ip > q->ip;
 }
 
 static int cmd_neigh_show(struct cmd_ctx *c, int argc, char **argv) {
+    static const char *u = "neigh show [vrf <vrf> | underlay] [offset <n>] [limit <n>]";
     struct page pg = {.w = c->out};
-    if (parse_page(c, argc, argv, "neigh show [offset <n>] [limit <n>]", &pg.offset, &pg.limit))
+    int first = 2;
+    row_table = -1;
+    if (argc > 2 && strcmp(argv[2], "underlay") == 0) {
+        row_table = NEIGH_UNDERLAY;
+        first = 3;
+    } else if (argc > 3 && strcmp(argv[2], "vrf") == 0) {
+        unsigned vrf;
+        if (resolve_vrf(c, argv[3], &vrf) != 0)
+            return -1;
+        row_table = (int)vrf;
+        first = 4;
+    }
+    if (parse_page(c, argc, argv, first, u, &pg.offset, &pg.limit))
         return -1;
     nrows = 0;
     neigh_walk(neigh_collect, NULL);
@@ -449,6 +623,12 @@ static int cmd_neigh_show(struct cmd_ctx *c, int argc, char **argv) {
         char ip[16], mac[18];
         ip_str(n->ip, ip);
         jw_obj_begin(c->out, NULL);
+        if (n->table == NEIGH_UNDERLAY) {
+            jw_str(c->out, "vrf", "underlay");
+        } else {
+            const struct vrf *v = vrf_by_id(n->table);
+            jw_str(c->out, "vrf", v ? v->name : "?");
+        }
         jw_str(c->out, "ip", ip);
         if (n->state == NEIGH_REACHABLE) {
             mac_str(n->mac, mac);
@@ -471,13 +651,234 @@ static int cmd_neigh_show(struct cmd_ctx *c, int argc, char **argv) {
 }
 
 static int cmd_neigh_del(struct cmd_ctx *c, int argc, char **argv) {
-    if (argc != 3)
-        return usage(c, "neigh del <ip>");
+    static const char *u = "neigh del <ip> [vrf <vrf>]";
+    if (argc != 3 && argc != 5)
+        return usage(c, u);
     uint32_t ip;
     const char *e = cmd_parse_ipv4(argv[2], &ip);
     if (e)
         return cmd_fail(c->err, e, "invalid address '%s'", argv[2]);
-    return neigh_del(ip, c->err);
+    unsigned vrf;
+    if (opt_vrf(c, argc, argv, 3, &vrf) != argc)
+        return argc == 5 && !vrf_by_name(argv[4]) ? -1 : usage(c, u);
+    return neigh_del(vrf, ip, c->err);
+}
+
+/* ---- VRFs, nodes, tunnel mappings ---- */
+
+static void count_neigh_cb(const struct neigh *n, void *arg) {
+    unsigned *cnt = arg; /* cnt[0] = table, cnt[1] = result */
+    if (n->table == cnt[0])
+        cnt[1]++;
+}
+
+static int cmd_vrf_show(struct cmd_ctx *c, int argc, char **argv) {
+    (void)argv;
+    if (argc != 2)
+        return usage(c, "vrf show");
+    jw_arr_begin(c->out, "vrfs");
+    for (unsigned i = 0; i < VRF_MAX; i++) {
+        const struct vrf *v = vrf_by_id(i);
+        if (!v)
+            continue;
+        unsigned cnt[2] = {i, 0};
+        neigh_walk(count_neigh_cb, cnt);
+        jw_obj_begin(c->out, NULL);
+        jw_str(c->out, "name", v->name);
+        jw_u64(c->out, "id", v->id);
+        jw_arr_begin(c->out, "ports");
+        for (unsigned k = 0; k < MAX_PORTS; k++) {
+            const struct port *p = port_get((uint8_t)k);
+            if (p && p->role == PORT_VM && p->vrf == v->id)
+                jw_str(c->out, NULL, p->name);
+        }
+        jw_arr_end(c->out);
+        jw_u64(c->out, "routes", route_count_vrf(v->id));
+        jw_u64(c->out, "neighbours", cnt[1]);
+        jw_u64(c->out, "labels", label_count_vrf(v->id));
+        jw_u64(c->out, "vnis", tunnel_vni_count_vrf(v->id));
+        jw_obj_end(c->out);
+    }
+    jw_arr_end(c->out);
+    return 0;
+}
+
+static int cmd_node_add(struct cmd_ctx *c, int argc, char **argv) {
+    static const char *u = "node add <name> ip <a.b.c.d> [rmac <mac>]";
+    if ((argc != 5 && argc != 7) || strcmp(argv[3], "ip") != 0 ||
+        (argc == 7 && strcmp(argv[5], "rmac") != 0))
+        return usage(c, u);
+    uint32_t ip;
+    uint8_t mac[6];
+    const char *e = cmd_parse_ipv4(argv[4], &ip);
+    if (e)
+        return cmd_fail(c->err, e, "invalid address '%s'", argv[4]);
+    if (argc == 7 && (e = cmd_parse_mac(argv[6], mac)))
+        return cmd_fail(c->err, e, "invalid MAC '%s'", argv[6]);
+    return node_add(argv[2], ip, argc == 7 ? mac : NULL, c->err);
+}
+
+static int cmd_node_set(struct cmd_ctx *c, int argc, char **argv) {
+    if (argc != 5 || strcmp(argv[3], "rmac") != 0)
+        return usage(c, "node set <name> rmac <mac>");
+    uint8_t mac[6];
+    const char *e = cmd_parse_mac(argv[4], mac);
+    if (e)
+        return cmd_fail(c->err, e, "invalid MAC '%s'", argv[4]);
+    return node_set_rmac(argv[2], mac, c->err);
+}
+
+static int cmd_node_del(struct cmd_ctx *c, int argc, char **argv) {
+    if (argc != 3)
+        return usage(c, "node del <name>");
+    return node_del(argv[2], c->err);
+}
+
+static void json_dir(struct jw *w, const char *key, const struct dir_stats d[ENCAP_COUNT]) {
+    jw_obj_begin(w, key);
+    for (int k = 0; k < ENCAP_COUNT; k++) {
+        jw_obj_begin(w, stats_encap_name((enum encap_kind)k));
+        jw_u64(w, "pkts", d[k].pkts);
+        jw_u64(w, "bytes", d[k].bytes);
+        jw_obj_end(w);
+    }
+    jw_obj_end(w);
+}
+
+static void json_node_counters(struct jw *w, uint8_t id) {
+    json_dir(w, "encap", g_stats.node[id].encap);
+    json_dir(w, "decap", g_stats.node[id].decap);
+}
+
+static int cmd_node_show(struct cmd_ctx *c, int argc, char **argv) {
+    (void)argv;
+    if (argc != 2)
+        return usage(c, "node show");
+    jw_arr_begin(c->out, "nodes");
+    for (unsigned i = 0; i < TUNNEL_MAX_NODES; i++) {
+        const struct node *n = node_get((uint8_t)i);
+        if (!n)
+            continue;
+        char ip[16], mac[18];
+        ip_str(n->ip, ip);
+        jw_obj_begin(c->out, NULL);
+        jw_str(c->out, "name", n->name);
+        jw_str(c->out, "ip", ip);
+        if (n->has_rmac) {
+            mac_str(n->rmac, mac);
+            jw_str(c->out, "rmac", mac);
+        } else {
+            jw_null(c->out, "rmac");
+        }
+        const struct neigh *nb = neigh_lookup(NEIGH_UNDERLAY, n->ip);
+        if (nb && nb->state == NEIGH_REACHABLE) {
+            mac_str(nb->mac, mac);
+            jw_str(c->out, "underlay_mac", mac);
+        } else {
+            jw_null(c->out, "underlay_mac");
+        }
+        jw_str(c->out, "state", !nb                          ? "unresolved"
+                                : nb->state == NEIGH_REACHABLE   ? "reachable"
+                                : nb->state == NEIGH_INCOMPLETE ? "resolving"
+                                                                 : "failed");
+        json_node_counters(c->out, n->id);
+        jw_obj_end(c->out);
+    }
+    jw_arr_end(c->out);
+    return 0;
+}
+
+static int cmd_label_add(struct cmd_ctx *c, int argc, char **argv) {
+    if (argc != 5 || strcmp(argv[3], "port") != 0)
+        return usage(c, "label add <label> port <port>");
+    uint64_t label;
+    const char *e = cmd_parse_uint(argv[2], 0, 0xffffffffu, &label);
+    if (e)
+        return cmd_fail(c->err, e, "label must be %d..%d", MPLS_LABEL_MIN, MPLS_LABEL_MAX);
+    struct port *p = port_find(argv[4]);
+    if (!p)
+        return cmd_fail(c->err, "unknown-port", "no such port '%s'", argv[4]);
+    return label_add((uint32_t)label, p->id, c->err);
+}
+
+static int cmd_label_del(struct cmd_ctx *c, int argc, char **argv) {
+    if (argc != 3)
+        return usage(c, "label del <label>");
+    uint64_t label;
+    const char *e = cmd_parse_uint(argv[2], 0, 0xffffffffu, &label);
+    if (e)
+        return cmd_fail(c->err, e, "label must be a number");
+    return label_del((uint32_t)label, c->err);
+}
+
+static int cmd_vni_add(struct cmd_ctx *c, int argc, char **argv) {
+    if (argc != 5 || strcmp(argv[3], "vrf") != 0)
+        return usage(c, "vni add <id> vrf <vrf>");
+    uint64_t vni;
+    const char *e = cmd_parse_uint(argv[2], 0, 0xffffffffu, &vni);
+    if (e)
+        return cmd_fail(c->err, e, "VNI must be %d..%d", VNI_MIN, VNI_MAX);
+    unsigned vrf;
+    if (resolve_vrf(c, argv[4], &vrf) != 0)
+        return -1;
+    return vni_add((uint32_t)vni, vrf, c->err);
+}
+
+static int cmd_vni_del(struct cmd_ctx *c, int argc, char **argv) {
+    if (argc != 3)
+        return usage(c, "vni del <id>");
+    uint64_t vni;
+    const char *e = cmd_parse_uint(argv[2], 0, 0xffffffffu, &vni);
+    if (e)
+        return cmd_fail(c->err, e, "VNI must be a number");
+    return vni_del((uint32_t)vni, c->err);
+}
+
+static void tunnel_label_cb(uint32_t label, uint8_t port, void *arg) {
+    struct jw *w = arg;
+    const struct port *p = port_get(port);
+    const struct vrf *v = p ? vrf_by_id(p->vrf) : NULL;
+    jw_obj_begin(w, NULL);
+    jw_u64(w, "label", label);
+    jw_str(w, "port", p ? p->name : "?");
+    jw_str(w, "vrf", v ? v->name : "?");
+    jw_obj_end(w);
+}
+
+static void tunnel_vni_cb(uint32_t vni, unsigned vrf, void *arg) {
+    struct jw *w = arg;
+    const struct vrf *v = vrf_by_id(vrf);
+    jw_obj_begin(w, NULL);
+    jw_u64(w, "vni", vni);
+    jw_str(w, "vrf", v ? v->name : "?");
+    jw_obj_end(w);
+}
+
+static int cmd_tunnel_show(struct cmd_ctx *c, int argc, char **argv) {
+    (void)argv;
+    if (argc != 2)
+        return usage(c, "tunnel show");
+    jw_arr_begin(c->out, "labels");
+    label_walk(tunnel_label_cb, c->out);
+    jw_arr_end(c->out);
+    jw_arr_begin(c->out, "vnis");
+    vni_walk(tunnel_vni_cb, c->out);
+    jw_arr_end(c->out);
+    const struct port *u = port_underlay();
+    if (u) {
+        char ip[20], mac[18];
+        prefix_str(u->ip, u->prefix_len, ip);
+        mac_str(u->mac, mac);
+        jw_obj_begin(c->out, "underlay");
+        jw_str(c->out, "port", u->name);
+        jw_str(c->out, "ip", ip);
+        jw_str(c->out, "mac", mac);
+        jw_u64(c->out, "mtu", u->mtu);
+        jw_obj_end(c->out);
+    } else {
+        jw_null(c->out, "underlay");
+    }
+    return 0;
 }
 
 static int cmd_stats_show(struct cmd_ctx *c, int argc, char **argv) {
@@ -502,6 +903,17 @@ static int cmd_stats_show(struct cmd_ctx *c, int argc, char **argv) {
     jw_arr_end(c->out);
     stats_json_drops(c->out);
     stats_json_events(c->out);
+    jw_arr_begin(c->out, "nodes");
+    for (unsigned i = 0; i <= TUNNEL_MAX_NODES; i++) {
+        const struct node *n = node_get((uint8_t)i);
+        if (!n && i != NODE_UNKNOWN)
+            continue;
+        jw_obj_begin(c->out, NULL);
+        jw_str(c->out, "name", n ? n->name : "unknown");
+        json_node_counters(c->out, (uint8_t)i);
+        jw_obj_end(c->out);
+    }
+    jw_arr_end(c->out);
     jw_obj_begin(c->out, "mbuf");
     jw_u64(c->out, "total", mbuf_pool_total());
     jw_u64(c->out, "in_use", mbuf_in_use());
@@ -559,7 +971,21 @@ struct cmd_def {
 };
 
 static const struct cmd_def cmds[] = {
+    {"vrf add", cmd_vrf_add, CMD_BOTH, 0},
+    {"vrf del", cmd_vrf_del, CMD_CLI, 0},
+    {"vrf show", cmd_vrf_show, CMD_CLI, 0},
     {"port add", cmd_port_add, CMD_CONFIG, 0},
+    {"underlay add", cmd_underlay_add, CMD_CONFIG, 0},
+    {"node add", cmd_node_add, CMD_BOTH, 0},
+    {"node set", cmd_node_set, CMD_CLI, 0},
+    {"node del", cmd_node_del, CMD_CLI, 0},
+    {"node show", cmd_node_show, CMD_CLI, 0},
+    {"label add", cmd_label_add, CMD_BOTH, 0},
+    {"label del", cmd_label_del, CMD_CLI, 0},
+    {"vni add", cmd_vni_add, CMD_BOTH, 0},
+    {"vni del", cmd_vni_del, CMD_CLI, 0},
+    {"tunnel show", cmd_tunnel_show, CMD_CLI, 0},
+    {"route replace", cmd_route_replace, CMD_CLI, 0},
     {"neigh add", cmd_neigh_add, CMD_BOTH, 0},
     {"route add", cmd_route_add, CMD_BOTH, 0},
     {"icmp-ratelimit", cmd_icmp_ratelimit, CMD_BOTH, 0},

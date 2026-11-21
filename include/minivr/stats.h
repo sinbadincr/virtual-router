@@ -4,7 +4,10 @@
 
 #include "json_out.h"
 
-#define MAX_PORTS 16
+#define MAX_PORTS 17 /* 16 VM ports + 1 underlay */
+#define MAX_VM_PORTS 16
+#define TUNNEL_MAX_NODES 64
+#define NODE_UNKNOWN TUNNEL_MAX_NODES /* pseudo-node for tunnels from unconfigured sources */
 
 #define DROP_REASONS(X)                                                                            \
     X(TRUNCATED, "truncated")                                                                      \
@@ -27,7 +30,16 @@
     X(PORT_DOWN, "port_down")                                                                      \
     X(LOCAL_UNSUPPORTED, "local_unsupported")                                                      \
     X(NOBUF, "nobuf")                                                                              \
-    X(TX_ERROR, "tx_error")
+    X(TX_ERROR, "tx_error")                                                                        \
+    X(TUNNEL_NOT_FOR_US, "tunnel_not_for_us")                                                      \
+    X(UNDERLAY_UNEXPECTED, "underlay_unexpected")                                                  \
+    X(BAD_UDP, "bad_udp")                                                                          \
+    X(BAD_VXLAN, "bad_vxlan")                                                                      \
+    X(BAD_MPLS, "bad_mpls")                                                                        \
+    X(BAD_INNER_L2, "bad_inner_l2")                                                                \
+    X(UNKNOWN_TAG, "unknown_tag")                                                                  \
+    X(DECAP_NO_LOCAL_DEST, "decap_no_local_dest")                                                  \
+    X(TUNNEL_MTU_EXCEEDED, "tunnel_mtu_exceeded")
 
 enum drop_reason {
 #define X(id, name) DROP_##id,
@@ -40,10 +52,22 @@ struct port_stats {
     uint64_t rx_pkts, rx_bytes, tx_pkts, tx_bytes, drops;
 };
 
+enum encap_kind { ENCAP_MPLSOUDP, ENCAP_VXLAN, ENCAP_COUNT };
+
+struct dir_stats {
+    uint64_t pkts, bytes;
+};
+
+/* Per remote node (index = node id; NODE_UNKNOWN collects decap from unconfigured sources). */
+struct node_stats {
+    struct dir_stats encap[ENCAP_COUNT], decap[ENCAP_COUNT];
+};
+
 struct stats {
     uint64_t drop_total;
     uint64_t reasons[DROP_COUNT];
     struct port_stats port[MAX_PORTS];
+    struct node_stats node[TUNNEL_MAX_NODES + 1];
     uint64_t icmp_ratelimited, neighbour_table_full, arp_replies_sent, icmp_sent;
 };
 
@@ -55,8 +79,11 @@ extern struct stats g_stats;
 const char *stats_reason_name(enum drop_reason r);
 void stats_drop(enum drop_reason r);                      /* counts total + reason */
 void stats_drop_port(uint8_t port, enum drop_reason r);   /* also the ingress port's drops */
+void stats_node_encap(uint8_t node, enum encap_kind k, uint64_t bytes);
+void stats_node_decap(uint8_t node, enum encap_kind k, uint64_t bytes);
+const char *stats_encap_name(enum encap_kind k); /* "mplsoudp" / "vxlan" */
 void stats_clear(void);                                   /* counters only, not gauges */
 uint64_t stats_reason_sum(void);
-void stats_json_drops(struct jw *w);  /* "drops":{total,reasons:{all 21}} */
+void stats_json_drops(struct jw *w);  /* "drops":{total,reasons:{all 30}} */
 void stats_json_events(struct jw *w); /* "events":{...} */
 #endif

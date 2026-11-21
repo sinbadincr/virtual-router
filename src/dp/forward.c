@@ -123,7 +123,7 @@ static void handle_arp(struct port *in, struct mbuf *m) {
         mbuf_free(m);
         return;
     }
-    const struct neigh *n = neigh_lookup(a.tpa);
+    const struct neigh *n = neigh_lookup(in->vrf, a.tpa);
     if (a.tpa == in->ip || (n && n->state == NEIGH_REACHABLE)) {
         pkt_arp_make_reply(f, in->mac);
         m->len = ARP_FRAME_LEN;
@@ -145,7 +145,7 @@ static void handle_ipv4(struct port *in, struct mbuf *m) {
     m->len = (uint16_t)(ETH_HDR_LEN + rd16(ip + 2)); /* strip Ethernet padding */
     uint32_t dst = rd32(ip + 16);
 
-    if (port_by_ip(dst)) { /* addressed to the forwarder itself */
+    if (port_by_ip(in->vrf, dst)) { /* addressed to the forwarder itself */
         if (ip[9] == IPPROTO_ICMP_ && m->len >= ETH_HDR_LEN + IPV4_HDR_LEN + 1 &&
             ip[IPV4_HDR_LEN] == ICMP_ECHO_REQUEST) {
             if (pkt_icmp_echo_reply(f, m->len) != 0) {
@@ -164,9 +164,13 @@ static void handle_ipv4(struct port *in, struct mbuf *m) {
         drop(in, m, DROP_TTL_EXCEEDED);
         return;
     }
-    const struct route *r = route_lookup(dst);
+    const struct route *r = route_lookup(in->vrf, dst);
     if (!r) {
         send_icmp_error(in, m, ICMP_UNREACH, ICMP_UNREACH_NET, 0);
+        drop(in, m, DROP_NO_ROUTE);
+        return;
+    }
+    if (r->kind == NH_REMOTE) { /* tunnel transmit path: encap.c (US2) */
         drop(in, m, DROP_NO_ROUTE);
         return;
     }
@@ -221,6 +225,10 @@ void forward_burst(struct port *in, struct mbuf **m, int n) {
         }
         if (b->vlan_tagged) { /* tag already stripped by the kernel: VLAN is unsupported */
             drop(in, b, DROP_UNSUPPORTED_ETHERTYPE);
+            continue;
+        }
+        if (in->role == PORT_UNDERLAY) { /* decap.c (US2) takes over; until then nothing is tunnelled */
+            drop(in, b, DROP_UNDERLAY_UNEXPECTED);
             continue;
         }
         if (!antispoof_ok(in, c, f, b->len)) {

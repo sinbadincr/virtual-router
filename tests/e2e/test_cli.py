@@ -43,12 +43,15 @@ def test_table_output_matches_the_contract(forwarder):
 def test_json_shapes(forwarder):
     r = vrctl("route", "show")
     assert r["ok"] is True
-    assert {"prefix": "10.0.1.0/24", "port": None, "gateway": None, "origin": "connected"} in r["data"]["routes"]
+    # phase 2 adds `vrf` (always "default" here) to every route (specs/003 contracts/cli.md)
+    assert {"vrf": "default", "prefix": "10.0.1.0/24", "port": None, "gateway": None,
+            "origin": "connected"} in r["data"]["routes"]
     p = vrctl("port", "show")["data"]["ports"][0]
-    assert set(p) == {"name", "ifname", "mac", "ip", "mtu", "admin", "oper", "rx_pkts", "rx_bytes",
-                      "tx_pkts", "tx_bytes", "drops"}
+    assert set(p) == {"name", "ifname", "role", "vrf", "mac", "ip", "mtu", "admin", "oper", "rx_pkts",
+                      "rx_bytes", "tx_pkts", "tx_bytes", "drops"}
+    assert p["role"] == "vm" and p["vrf"] == "default"
     s = stats()
-    assert set(s) == {"ports", "drops", "events", "mbuf"}
+    assert set(s) == {"ports", "drops", "events", "nodes", "mbuf"}  # nodes: phase 2
     assert set(s["ports"][0]) == {"name", "rx_pkts", "rx_bytes", "tx_pkts", "tx_bytes", "drops"}
     assert s["mbuf"] == {"total": 4096, "in_use": 0}
     e = vrctl("route", "del", "10.0.2.13/32")
@@ -93,7 +96,7 @@ def test_v11_drop_counters_add_up(forwarder):
     d = stats()["drops"]
     assert d["total"] >= 5
     assert d["total"] == sum(d["reasons"].values())  # SC-007
-    assert len(d["reasons"]) == 21
+    assert len(d["reasons"]) == 30  # 21 of phase 1 + 9 tunnel reasons (phase 2)
 
 
 def test_stats_clear_zeroes_counters_but_not_gauges(forwarder):
