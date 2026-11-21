@@ -172,3 +172,7 @@ Lab-script tests: `tests/e2e_kvm/test_kvm_lab.py`; classification check:
 | SC-005 | `test_traceability.py` |
 | SC-006 | quickstart D8, D9 |
 | SC-007 | quickstart D12 |
+
+## Phase 2: VRFs and overlay tunnels (`specs/003-vrf-overlay-tunnels/spec.md`)
+
+_Filled in at the end of the feature (task T066)._
