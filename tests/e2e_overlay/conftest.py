@@ -7,6 +7,7 @@ Everything needs root. Time budget: MINIVR_E2E_OVERLAY_BUDGET_S (default 300 s h
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -100,13 +101,11 @@ class Vm:
             assert r.returncode == 0, f"{self.name}: {cmd!r} exited {r.returncode}\n{r.stdout}\n{r.stderr}"
         return r
 
-    def ping(self, dst, count=3, interval=0.2, extra="", timeout=60):
-        """Run ping; returns (loss_percent, ttl_set, stdout)."""
-        # CirrOS busybox ping has no -i: the interval is only honoured on the harness variant
-        ival = f"-i {interval}" if VARIANT == "harness" else ""
-        r = self.run(f"ping -c {count} {ival} -W 1 {extra} {dst}", check=False, timeout=timeout)
+    def ping(self, dst, count=3, interval=0.2, extra="", timeout=300):
+        """Run ping; returns (loss_percent, ttl_set, stdout). Intervals below 0.2 s need root."""
+        sudo = "sudo " if VARIANT == "kvm" else ""
+        r = self.run(f"{sudo}ping -c {count} -i {interval} -W 1 {extra} {dst}", check=False, timeout=timeout)
         out = r.stdout
-        import re
         m = re.search(r"(\d+(?:\.\d+)?)% packet loss", out)
         loss = float(m.group(1)) if m else 100.0
         return loss, set(re.findall(r"ttl=(\d+)", out)), out
@@ -125,6 +124,25 @@ def v(node, *args, json_out=True):
             raise RuntimeError(f"vrctl {node} exit {r.returncode}: {r.stderr}")
         return json.loads(r.stdout)
     return sh(VRCTL_BIN, "-s", sock, *args, check=True).stdout
+
+
+def vc(node, *args):
+    """vrctl command that must succeed; returns the parsed response."""
+    r = v(node, *args)
+    assert r["ok"] is True, f"vrctl {node} {' '.join(map(str, args))}: {r}"
+    return r
+
+
+def reasons(node):
+    return v(node, "stats", "show")["data"]["drops"]["reasons"]
+
+
+@pytest.fixture()
+def fresh(overlay_lab):
+    """Both forwarders freshly started with the shipped configs (zeroed counters and tables)."""
+    r = run_lab("run")
+    assert r.returncode == 0, r.stderr
+    yield forwarder_pids()
 
 
 def forwarder_pids():

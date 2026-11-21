@@ -30,6 +30,17 @@ overlay_nodes_isolation() {
   done
 }
 
+# The kernel raises a veth's carrier asynchronously; a forwarder started right after `up` would
+# see the port down. Wait (at most 5 s) until the device reports LOWER_UP.
+wait_carrier() { # ns dev
+  local i
+  for i in $(seq 1 50); do
+    nsx "$1" ip -o link show "$2" 2>/dev/null | grep -q LOWER_UP && return 0
+    sleep 0.1
+  done
+  echo "warning: no carrier on $1/$2 after 5s" >&2
+}
+
 lab_up_overlay_harness() {
   need_root
   refuse_other_kind overlay/harness
@@ -58,6 +69,12 @@ lab_up_overlay_harness() {
     nsx $cn ip link set "$name" up
   done
   underlay_up
+  for spec in "${OV_GUESTS[@]}"; do
+    read -r name node vmmac addr gw pmac mip mtap <<<"$spec"
+    wait_carrier mvr-cn$node "$name"
+  done
+  wait_carrier mvr-cn1 u0
+  wait_carrier mvr-cn2 u0
   echo "lab up (overlay/harness): mvr-cn1 mvr-cn2 mvr-ul + 5 namespace VMs"
 }
 
