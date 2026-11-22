@@ -11,10 +11,12 @@ static const char *expected[] = {
     "source_spoofed",   "no_route",             "ttl_exceeded",         "mtu_exceeded",
     "neighbour_unresolved", "port_down",        "local_unsupported",    "nobuf",
     "tx_error",
+    "tunnel_not_for_us", "underlay_unexpected", "bad_udp", "bad_vxlan", "bad_mpls",
+    "bad_inner_l2",     "unknown_tag",          "decap_no_local_dest", "tunnel_mtu_exceeded",
 };
 
 TEST(all_reasons_have_stable_names) {
-    CHECK_EQ_U64(DROP_COUNT, 21);
+    CHECK_EQ_U64(DROP_COUNT, 30);
     for (int i = 0; i < DROP_COUNT; i++)
         CHECK_STR_EQ(stats_reason_name((enum drop_reason)i), expected[i]);
 }
@@ -67,4 +69,33 @@ TEST(json_has_every_reason) {
     }
     CHECK(strstr(b, "\"total\":1") != NULL);
     CHECK(strstr(b, "\"icmp_ratelimited\":0") != NULL);
+}
+
+TEST(node_counters_per_encap_and_the_unknown_pseudo_node) {
+    stats_clear();
+    stats_node_encap(3, ENCAP_MPLSOUDP, 100);
+    stats_node_encap(3, ENCAP_MPLSOUDP, 50);
+    stats_node_encap(3, ENCAP_VXLAN, 70);
+    stats_node_decap(3, ENCAP_VXLAN, 10);
+    stats_node_decap(NODE_UNKNOWN, ENCAP_MPLSOUDP, 5);
+    CHECK_EQ_U64(g_stats.node[3].encap[ENCAP_MPLSOUDP].pkts, 2);
+    CHECK_EQ_U64(g_stats.node[3].encap[ENCAP_MPLSOUDP].bytes, 150);
+    CHECK_EQ_U64(g_stats.node[3].encap[ENCAP_VXLAN].pkts, 1);
+    CHECK_EQ_U64(g_stats.node[3].decap[ENCAP_VXLAN].bytes, 10);
+    CHECK_EQ_U64(g_stats.node[3].decap[ENCAP_MPLSOUDP].pkts, 0);
+    CHECK_EQ_U64(g_stats.node[NODE_UNKNOWN].decap[ENCAP_MPLSOUDP].pkts, 1);
+    stats_node_encap(200, ENCAP_VXLAN, 1); /* out of range: ignored, no overflow */
+    CHECK_STR_EQ(stats_encap_name(ENCAP_MPLSOUDP), "mplsoudp");
+    CHECK_STR_EQ(stats_encap_name(ENCAP_VXLAN), "vxlan");
+    stats_clear();
+    CHECK_EQ_U64(g_stats.node[3].encap[ENCAP_MPLSOUDP].pkts, 0);
+}
+
+TEST(nine_new_reasons_keep_total_equal_to_the_sum) {
+    stats_clear();
+    for (int i = DROP_TUNNEL_NOT_FOR_US; i <= DROP_TUNNEL_MTU_EXCEEDED; i++)
+        stats_drop((enum drop_reason)i);
+    CHECK_EQ_U64(DROP_TUNNEL_MTU_EXCEEDED - DROP_TUNNEL_NOT_FOR_US + 1, 9);
+    CHECK_EQ_U64(g_stats.drop_total, 9);
+    CHECK_EQ_U64(stats_reason_sum(), 9);
 }

@@ -53,7 +53,7 @@ TEST(binding_follows_neighbour_delete) {
     size_t n = make_echo(f, MAC_P3, MAC_VM2, VM3_IP, VM1_IP, 64, ICMP_ECHO_REQUEST, 1, 1);
     CHECK(!antispoof_ok(p3, ETH_C_IPV4, f, n));
     struct cmd_err e;
-    CHECK(neigh_del(VM3_IP, &e) == 0);
+    CHECK(neigh_del(0, VM3_IP, &e) == 0);
     CHECK(antispoof_ok(p3, ETH_C_IPV4, f, n));
     fx_teardown();
 }

@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "fixture.h"
+#include "overlay_fixture.h"
 #include "minivr/config.h"
 #include "tharness.h"
 
@@ -66,7 +67,7 @@ TEST(comments_blank_lines_and_crlf_are_ignored) {
     CHECK_EQ_U64(load(err, sizeof err), 0);
     CHECK_EQ_U64(err[0], 0);
     CHECK(port_find("p1") != NULL);
-    CHECK(neigh_lookup(VM1_IP) != NULL);
+    CHECK(neigh_lookup(0, VM1_IP) != NULL);
     CHECK_EQ_U64(ratelimit_rate(), 50); /* the last line had no newline */
     teardown();
 }
@@ -122,4 +123,46 @@ TEST(missing_file_and_unknown_interface_fail_cleanly) {
     CHECK_EQ_U64(load(err, sizeof err), -1);
     CHECK(strstr(err, ":1: not-found: cannot open interface nosuch0") != NULL);
     teardown();
+}
+
+/* ---- shipped configs (phase 2) ---- */
+
+TEST(overlay_configs_parse_with_no_error) {
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    CHECK_EQ_U64(port_count(), 3); /* red1 blue1 u0 */
+    CHECK_EQ_U64(vrf_count(), 3);
+    CHECK_EQ_U64(node_count(), 2); /* cn2 and the interop endpoint `ix` */
+    CHECK(node_find("ix") != NULL && node_find("ix")->has_rmac);
+    CHECK(route_find(vrf_by_name("blue")->id, IP4(10, 1, 3, 33), 32) != NULL);
+    CHECK_EQ_U64(label_count(), 1);
+    CHECK_EQ_U64(vni_count(), 1);
+    CHECK_EQ_U64(ratelimit_rate(), 100);
+    ov_teardown();
+    CHECK_EQ_U64(ov_setup(2, 1600), 0);
+    CHECK_EQ_U64(port_count(), 4);
+    CHECK_EQ_U64(label_count(), 2);
+    CHECK(node_find("cn1") != NULL && node_find("cn1")->has_rmac);
+    ov_teardown();
+}
+
+/* FR-023: the phase 1 lab config still means exactly what it meant: everything in `default`,
+ * no underlay, no tunnels. */
+TEST(phase1_config_parses_to_the_phase1_state) {
+    ov_reset();
+    pio_fake_add_if("p1", MAC_P1, 1500);
+    pio_fake_add_if("p2", MAC_P2, 1500);
+    pio_fake_add_if("p3", MAC_P3, 1500);
+    port_set_backend(&pio_fake_ops);
+    CHECK_EQ_U64(config_load(MINIVR_SOURCE_DIR "/lab/cn1.conf"), 0);
+    CHECK_EQ_U64(vrf_count(), 1);
+    CHECK(port_underlay() == NULL);
+    CHECK_EQ_U64(node_count() + label_count() + vni_count(), 0);
+    CHECK_EQ_U64(port_count(), 3);
+    for (unsigned i = 0; i < 3; i++)
+        CHECK_EQ_U64(port_get((uint8_t)i)->vrf, 0);
+    CHECK_EQ_U64(route_count(), 5); /* 2 connected + 3 host, all in default */
+    CHECK_EQ_U64(route_count_vrf(0), 5);
+    CHECK_EQ_U64(neigh_count(), 3);
+    CHECK(neigh_lookup(0, VM1_IP) != NULL);
+    ov_teardown();
 }

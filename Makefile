@@ -15,9 +15,11 @@ test-asan:
 check:
 	scripts/check.sh
 
-# the lab: three KVM guests behind the forwarder (needs /dev/kvm)
+# the lab: KVM guests behind the forwarder (needs /dev/kvm). TOPO=overlay: two compute nodes,
+# an emulated underlay and 5 guests (specs/003-vrf-overlay-tunnels).
+TOPO ?= single
 lab:
-	lab/lab.sh up
+	lab/lab.sh up --topo $(TOPO)
 
 lab-run:
 	lab/lab.sh run

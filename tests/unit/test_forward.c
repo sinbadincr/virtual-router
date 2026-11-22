@@ -1,4 +1,5 @@
 #include "fixture.h"
+#include "overlay_fixture.h"
 #include "tharness.h"
 
 static uint8_t f[2048];
@@ -190,7 +191,7 @@ TEST(egress_down_is_dropped) {
 TEST(hairpin_is_forwarded) {
     fx_setup(1);
     struct cmd_err e;
-    CHECK(route_add_static(IP4(10, 0, 9, 0), 24, port_find("p1")->id, VM1_IP, &e) == 0);
+    CHECK(route_add_static(0, IP4(10, 0, 9, 0), 24, port_find("p1")->id, VM1_IP, &e) == 0);
     fx_rx(1, f, echo_from_vm1(IP4(10, 0, 9, 5), 64));
     CHECK_EQ_U64(fx_tx_count(1), 1);
     size_t len;
@@ -270,7 +271,7 @@ TEST(unbound_port_learns_and_releases_the_held_packet) {
     const uint8_t *o = tx1(3, 0, &len);
     CHECK_MEM_EQ(o, MAC_VM3, 6);
     CHECK_EQ_U64(o[ETH_HDR_LEN + 8], 63);
-    const struct neigh *ne = neigh_lookup(VM3_IP);
+    const struct neigh *ne = neigh_lookup(0, VM3_IP);
     CHECK(ne && ne->kind == NEIGH_LEARNED && ne->state == NEIGH_REACHABLE);
     CHECK_EQ_U64(mbuf_in_use(), 0);
     CHECK_EQ_U64(g_stats.drop_total, 0);
@@ -282,7 +283,7 @@ TEST(unbound_port_learns_from_arp_requests_too) {
     size_t n = make_arp_request(f, MAC_VM3, VM3_IP, GW3_IP);
     fx_rx(3, f, n);
     CHECK_EQ_U64(fx_tx_count(3), 1); /* reply for the gateway */
-    CHECK(neigh_lookup(VM3_IP) != NULL);
+    CHECK(neigh_lookup(0, VM3_IP) != NULL);
     fx_teardown();
 }
 
@@ -292,7 +293,7 @@ TEST(gratuitous_arp_is_consumed_silently) {
     fx_rx(3, f, n);
     CHECK_EQ_U64(fx_tx_count(3), 0);
     CHECK_EQ_U64(g_stats.drop_total, 0);
-    CHECK(neigh_lookup(VM3_IP) != NULL);
+    CHECK(neigh_lookup(0, VM3_IP) != NULL);
     fx_teardown();
 }
 
@@ -326,4 +327,280 @@ TEST(kernel_stripped_vlan_tag_is_unsupported_ethertype) {
     CHECK_EQ_U64(fx_tx_count(3), 0);
     CHECK_EQ_U64(mbuf_in_use(), 0);
     fx_teardown();
+}
+
+/* ---- phase 1 inside VRFs (phase 2) ----
+ * red: r1 10.1.1.11, r2 10.1.1.12 (gateway 10.1.1.1/24)
+ * blue: b1 10.1.1.11, b2 10.1.1.13 (gateway 10.1.1.254/24, the same subnet as red's) */
+
+static const uint8_t M_R1[6] = {2, 0, 0, 0x0a, 1, 1}, M_R2[6] = {2, 0, 0, 0x0a, 1, 2};
+static const uint8_t M_B1[6] = {2, 0, 0, 0x0a, 1, 3}, M_B2[6] = {2, 0, 0, 0x0a, 1, 4};
+static const uint8_t V_R1[6] = {2, 0, 0, 1, 1, 0x11}, V_R2[6] = {2, 0, 0, 1, 1, 0x12};
+static const uint8_t V_B1[6] = {2, 0, 0, 2, 1, 0x11}, V_B2[6] = {2, 0, 0, 2, 1, 0x13};
+
+static void vrf_setup(void) {
+    ov_reset();
+    const char *names[] = {"r1", "r2", "b1", "b2"};
+    const uint8_t *macs[] = {M_R1, M_R2, M_B1, M_B2};
+    for (int i = 0; i < 4; i++)
+        pio_fake_add_if(names[i], macs[i], 1500);
+    pio_fake_add_if("u0", OV_UL_MAC1, 1600);
+    port_set_backend(&pio_fake_ops);
+    CHECK(fx_cmd("vrf add red id 1") == 0);
+    CHECK(fx_cmd("vrf add blue id 2") == 0);
+    CHECK(fx_cmd("underlay add u0 ifname u0 ip 172.16.0.1/24") == 0);
+    CHECK(fx_cmd("port add r1 ifname r1 ip 10.1.1.1/24 vrf red") == 0);
+    CHECK(fx_cmd("port add r2 ifname r2 ip 10.1.1.1/24 vrf red") == 0);
+    CHECK(fx_cmd("port add b1 ifname b1 ip 10.1.1.254/24 vrf blue") == 0);
+    CHECK(fx_cmd("port add b2 ifname b2 ip 10.1.1.254/24 vrf blue") == 0);
+    CHECK(fx_cmd("neigh add 10.1.1.11 lladdr 02:00:00:01:01:11 dev r1") == 0);
+    CHECK(fx_cmd("neigh add 10.1.1.12 lladdr 02:00:00:01:01:12 dev r2") == 0);
+    CHECK(fx_cmd("neigh add 10.1.1.11 lladdr 02:00:00:02:01:11 dev b1") == 0);
+    CHECK(fx_cmd("neigh add 10.1.1.13 lladdr 02:00:00:02:01:13 dev b2") == 0);
+}
+
+TEST(vrf_forward_goes_to_the_ports_of_the_ingress_vrf_only) {
+    vrf_setup();
+    uint8_t fr[256];
+    size_t n = make_echo(fr, M_R1, V_R1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 12), 64, ICMP_ECHO_REQUEST, 1, 1);
+    ov_rx("r1", fr, n);
+    CHECK_EQ_U64(ov_tx_count("r2"), 1);
+    CHECK_EQ_U64(ov_tx_count("b1") + ov_tx_count("b2") + ov_tx_count("r1"), 0);
+    size_t len;
+    const uint8_t *o = ov_tx("r2", 0, &len);
+    CHECK_MEM_EQ(o, V_R2, 6);
+    CHECK_MEM_EQ(o + 6, M_R2, 6);
+    CHECK_EQ_U64(o[ETH_HDR_LEN + 8], 63);
+    ov_clear_tx();
+    /* blue: same source IP, destination 10.1.1.13 lives in blue only */
+    n = make_echo(fr, M_B1, V_B1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 13), 64, ICMP_ECHO_REQUEST, 1, 1);
+    ov_rx("b1", fr, n);
+    CHECK_EQ_U64(ov_tx_count("b2"), 1);
+    CHECK_MEM_EQ(ov_tx("b2", 0, &len), V_B2, 6);
+    CHECK_EQ_U64(ov_tx_count("r1") + ov_tx_count("r2"), 0);
+    CHECK_EQ_U64(g_stats.drop_total, 0);
+    check_invariants();
+    ov_teardown();
+}
+
+TEST(a_destination_that_exists_only_in_the_other_vrf_is_not_reachable) {
+    vrf_setup();
+    uint8_t fr[256];
+    /* red1 -> 10.1.1.13 exists only in blue: red has the subnet but no host route for it */
+    size_t n = make_echo(fr, M_R1, V_R1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 13), 64, ICMP_ECHO_REQUEST, 1, 1);
+    ov_rx("r1", fr, n);
+    CHECK_EQ_U64(ov_tx_count("b2"), 0);
+    CHECK_EQ_U64(g_stats.reasons[DROP_NO_ROUTE], 1);
+    /* and the ICMP host unreachable comes from red's gateway, out of the ingress port */
+    CHECK_EQ_U64(ov_tx_count("r1"), 1);
+    size_t len;
+    const uint8_t *o = ov_tx("r1", 0, &len);
+    CHECK_EQ_U64(o[ETH_HDR_LEN + 12], 10);
+    CHECK_EQ_U64(rd32(o + ETH_HDR_LEN + 12), IP4(10, 1, 1, 1));
+    check_invariants();
+    ov_teardown();
+}
+
+TEST(icmp_errors_are_sourced_from_the_ingress_vrfs_gateway) {
+    vrf_setup();
+    uint8_t fr[256];
+    size_t n = make_echo(fr, M_B1, V_B1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 13), 1, ICMP_ECHO_REQUEST, 1, 1);
+    ov_rx("b1", fr, n); /* TTL 1 */
+    CHECK_EQ_U64(ov_tx_count("b1"), 1);
+    size_t len;
+    const uint8_t *o = ov_tx("b1", 0, &len);
+    CHECK_EQ_U64(rd32(o + ETH_HDR_LEN + 12), IP4(10, 1, 1, 254)); /* blue's gateway, not red's */
+    CHECK_EQ_U64(o[ETH_HDR_LEN + IPV4_HDR_LEN], ICMP_TIME_EXCEEDED);
+    ov_teardown();
+}
+
+TEST(arp_is_answered_from_the_ingress_vrf_only) {
+    vrf_setup();
+    uint8_t fr[64];
+    size_t len;
+    /* gateway of each VRF */
+    ov_rx("r1", fr, make_arp_request(fr, V_R1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 1)));
+    CHECK_EQ_U64(ov_tx_count("r1"), 1);
+    CHECK_MEM_EQ(ov_tx("r1", 0, &len) + 22, M_R1, 6); /* sender hardware address of the reply */
+    ov_clear_tx();
+    ov_rx("b1", fr, make_arp_request(fr, V_B1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 1)));
+    CHECK_EQ_U64(ov_tx_count("b1"), 0); /* 10.1.1.1 is red's gateway, not blue's */
+    ov_rx("b1", fr, make_arp_request(fr, V_B1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 254)));
+    CHECK_EQ_U64(ov_tx_count("b1"), 1);
+    ov_clear_tx();
+    /* a neighbour: known in red, unknown in blue */
+    ov_rx("r1", fr, make_arp_request(fr, V_R1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 12)));
+    CHECK_EQ_U64(ov_tx_count("r1"), 1);
+    ov_clear_tx();
+    ov_rx("b1", fr, make_arp_request(fr, V_B1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 12)));
+    CHECK_EQ_U64(ov_tx_count("b1"), 0);
+    ov_rx("r1", fr, make_arp_request(fr, V_R1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 13)));
+    CHECK_EQ_U64(ov_tx_count("r1"), 0);
+    CHECK_EQ_U64(g_stats.reasons[DROP_ARP_UNKNOWN_TARGET], 3);
+    check_invariants();
+    ov_teardown();
+}
+
+TEST(echo_to_a_gateway_is_answered_in_its_own_vrf) {
+    vrf_setup();
+    uint8_t fr[256];
+    size_t n = make_echo(fr, M_R1, V_R1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 1), 64, ICMP_ECHO_REQUEST, 1, 1);
+    ov_rx("r1", fr, n);
+    CHECK_EQ_U64(ov_tx_count("r1"), 1);
+    ov_clear_tx();
+    /* 10.1.1.1 is not an address of the forwarder inside blue: not answered, routed as transit */
+    n = make_echo(fr, M_B1, V_B1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 1), 64, ICMP_ECHO_REQUEST, 1, 1);
+    ov_rx("b1", fr, n);
+    CHECK_EQ_U64(g_stats.reasons[DROP_LOCAL_UNSUPPORTED], 0);
+    CHECK_EQ_U64(ov_tx_count("b1") + 0, 1); /* an ICMP host unreachable, not an echo reply */
+    size_t len;
+    CHECK(ov_tx("b1", 0, &len)[ETH_HDR_LEN + IPV4_HDR_LEN] != ICMP_ECHO_REPLY);
+    ov_teardown();
+}
+
+TEST(only_non_tunnel_non_arp_non_echo_frames_on_the_underlay_are_unexpected) {
+    vrf_setup();
+    uint8_t fr[256];
+    uint8_t seg[8] = {0};
+    size_t n = make_ipv4(fr, OV_UL_MAC1, OV_UL_MAC2, IP4(172, 16, 0, 2), IP4(172, 16, 0, 1), 64, 6, seg, sizeof seg);
+    ov_rx("u0", fr, n); /* TCP */
+    CHECK_EQ_U64(g_stats.reasons[DROP_UNDERLAY_UNEXPECTED], 1);
+    n = make_echo(fr, OV_UL_MAC1, OV_UL_MAC2, IP4(172, 16, 0, 2), IP4(172, 16, 0, 1), 64, ICMP_ECHO_REQUEST, 1, 1);
+    ov_rx("u0", fr, n); /* echo to the underlay address: answered, no drop */
+    CHECK_EQ_U64(g_stats.reasons[DROP_UNDERLAY_UNEXPECTED], 1);
+    CHECK_EQ_U64(ov_tx_count("u0"), 1);
+    check_invariants();
+    CHECK_EQ_U64(mbuf_in_use(), 0);
+    ov_teardown();
+}
+
+/* ---- two-node round trip (phase 2): cn1 encapsulates, the captured frame is injected into cn2 ---- */
+
+static uint8_t wire[2048];
+static size_t wire_len;
+
+/* Send a ping from `vm` on cn1 and capture the frame cn1 puts on its underlay (resolving cn2's
+ * MAC through a real ARP exchange first). */
+static void cn1_sends(const char *port, int pidx, const uint8_t *vmmac, uint32_t dst) {
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    uint8_t pm[6], fr[128];
+    ov_port_mac(pm, 1, pidx);
+    size_t n = make_echo(fr, pm, vmmac, IP4(10, 1, 1, 11), dst, 64, ICMP_ECHO_REQUEST, 7, 1);
+    ov_rx(port, fr, n);
+    uint8_t rep[64];
+    make_arp_reply(rep, OV_UL_MAC1, OV_UL_MAC2, IP4(172, 16, 0, 2), IP4(172, 16, 0, 1));
+    ov_clear_tx();
+    ov_rx("u0", rep, ARP_FRAME_LEN); /* releases the held, already encapsulated packet */
+    CHECK_EQ_U64(ov_tx_count("u0"), 1);
+    const uint8_t *o = ov_tx("u0", 0, &wire_len);
+    CHECK(wire_len > 0 && wire_len <= sizeof wire);
+    memcpy(wire, o, wire_len);
+    ov_teardown();
+}
+
+TEST(round_trip_red_mplsoudp_to_red2) {
+    cn1_sends("red1", 1, OV_RED1, IP4(10, 1, 1, 12));
+    CHECK_EQ_U64(ov_setup(2, 1600), 0);
+    ov_rx("u0", wire, wire_len);
+    CHECK_EQ_U64(ov_tx_count("red2"), 1);
+    size_t len;
+    const uint8_t *o = ov_tx("red2", 0, &len);
+    CHECK_MEM_EQ(o, OV_RED2, 6);
+    CHECK_EQ_U64(o[ETH_HDR_LEN + 8], 63); /* one routed hop */
+    CHECK_EQ_U64(rd32(o + ETH_HDR_LEN + 12), IP4(10, 1, 1, 11));
+    CHECK_EQ_U64(rd32(o + ETH_HDR_LEN + 16), IP4(10, 1, 1, 12));
+    CHECK_EQ_U64(pkt_csum16(o + ETH_HDR_LEN, IPV4_HDR_LEN), 0);
+    CHECK_EQ_U64(g_stats.drop_total, 0);
+    ov_teardown();
+}
+
+TEST(round_trip_blue_vxlan_to_blue2) {
+    cn1_sends("blue1", 2, OV_BLUE1, IP4(10, 1, 1, 12));
+    CHECK_EQ_U64(ov_setup(2, 1600), 0);
+    ov_rx("u0", wire, wire_len);
+    CHECK_EQ_U64(ov_tx_count("blue2"), 1);
+    CHECK_EQ_U64(ov_tx_count("red2"), 0); /* same destination address, other tenant: not delivered */
+    size_t len;
+    const uint8_t *o = ov_tx("blue2", 0, &len);
+    CHECK_MEM_EQ(o, OV_BLUE2, 6);
+    CHECK_EQ_U64(o[ETH_HDR_LEN + 8], 63);
+    ov_teardown();
+}
+
+TEST(round_trip_red_to_the_second_red_vm_on_cn2) {
+    cn1_sends("red1", 1, OV_RED1, IP4(10, 1, 2, 13));
+    CHECK_EQ_U64(ov_setup(2, 1600), 0);
+    ov_rx("u0", wire, wire_len);
+    CHECK_EQ_U64(ov_tx_count("red3"), 1);
+    CHECK_EQ_U64(ov_tx_count("red2"), 0);
+    size_t len;
+    CHECK_MEM_EQ(ov_tx("red3", 0, &len), OV_RED3, 6);
+    ov_teardown();
+}
+
+TEST(reply_direction_cn2_to_cn1_for_both_encapsulations) {
+    CHECK_EQ_U64(ov_setup(2, 1600), 0);
+    neigh_learn(IP4(172, 16, 0, 1), OV_UL_MAC1, port_underlay()->id);
+    uint8_t pm[6], fr[128];
+    ov_port_mac(pm, 2, 1);
+    size_t n = make_echo(fr, pm, OV_RED2, IP4(10, 1, 1, 12), IP4(10, 1, 1, 11), 64, ICMP_ECHO_REPLY, 7, 1);
+    ov_rx("red2", fr, n);
+    ov_port_mac(pm, 2, 3);
+    n = make_echo(fr, pm, OV_BLUE2, IP4(10, 1, 1, 12), IP4(10, 1, 1, 11), 64, ICMP_ECHO_REPLY, 7, 1);
+    ov_rx("blue2", fr, n);
+    CHECK_EQ_U64(ov_tx_count("u0"), 2);
+    uint8_t w0[256], w1[256];
+    size_t l0, l1;
+    const uint8_t *t0 = ov_tx("u0", 0, &l0); /* (a separate statement: the length is an output) */
+    memcpy(w0, t0, l0);
+    const uint8_t *t1 = ov_tx("u0", 1, &l1);
+    memcpy(w1, t1, l1);
+    ov_teardown();
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    ov_rx("u0", w0, l0);
+    ov_rx("u0", w1, l1);
+    CHECK_EQ_U64(ov_tx_count("red1"), 1);
+    CHECK_EQ_U64(ov_tx_count("blue1"), 1);
+    size_t len;
+    CHECK_EQ_U64(ov_tx("red1", 0, &len)[ETH_HDR_LEN + 8], 63);
+    CHECK_EQ_U64(ov_tx("blue1", 0, &len)[ETH_HDR_LEN + 8], 63);
+    ov_teardown();
+}
+
+/* ---- proxy ARP for VMs on another node (research R7) ---- */
+
+TEST(proxy_arp_answers_only_for_slash32_remote_routes_of_the_ingress_vrf) {
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    uint8_t a[64], pm[6];
+    ov_port_mac(pm, 1, 1);
+    size_t len;
+    /* red1 asks for red2's address, which lives on cn2 */
+    ov_rx("red1", a, make_arp_request(a, OV_RED1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 12)));
+    CHECK_EQ_U64(ov_tx_count("red1"), 1);
+    const uint8_t *r = ov_tx("red1", 0, &len);
+    CHECK_EQ_U64(rd16(r + 20), ARP_OP_REPLY);
+    CHECK_MEM_EQ(r + 22, pm, 6); /* the port's MAC stands in for the remote VM */
+    ov_clear_tx();
+    /* an address nobody has */
+    ov_rx("red1", a, make_arp_request(a, OV_RED1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 99)));
+    CHECK_EQ_U64(ov_tx_count("red1"), 0);
+    CHECK_EQ_U64(g_stats.reasons[DROP_ARP_UNKNOWN_TARGET], 1);
+    /* blue: its own remote /32 is answered, red's red3 address is not (red only) */
+    ov_rx("blue1", a, make_arp_request(a, OV_BLUE1, IP4(10, 1, 1, 11), IP4(10, 1, 1, 12)));
+    CHECK_EQ_U64(ov_tx_count("blue1"), 1);
+    ov_clear_tx();
+    ov_rx("blue1", a, make_arp_request(a, OV_BLUE1, IP4(10, 1, 1, 11), IP4(10, 1, 2, 13)));
+    CHECK_EQ_U64(ov_tx_count("blue1"), 0);
+    CHECK_EQ_U64(g_stats.reasons[DROP_ARP_UNKNOWN_TARGET], 2);
+    ov_teardown();
+}
+
+TEST(a_wider_remote_prefix_is_not_proxy_arped) {
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    struct cmd_err e;
+    CHECK(ov_cmd(CMD_CLI, "route add 10.50.0.0/16 vrf red node cn2 encap mplsoudp label 1500", &e) == 0);
+    uint8_t a[64];
+    ov_rx("red1", a, make_arp_request(a, OV_RED1, IP4(10, 1, 1, 11), IP4(10, 50, 1, 1)));
+    CHECK_EQ_U64(ov_tx_count("red1"), 0);
+    ov_teardown();
 }

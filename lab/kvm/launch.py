@@ -32,6 +32,16 @@ GUESTS = {
             "port": "p3", "mgmt_mac": "02:00:00:00:02:03", "mgmt_addr": "10.99.0.13/24",
             "mgmt_tap": "m3"},
 }
+# Overlay lab (specs/003 contracts/lab-overlay.md): TAP name = guest name inside its node namespace
+for _n, _node, _mac, _addr, _gw, _mip, _mtap in (
+        ("red1", 1, "02:00:00:01:01:11", "10.1.1.11/24", "10.1.1.1", 21, "mr1"),
+        ("blue1", 1, "02:00:00:02:01:11", "10.1.1.11/24", "10.1.1.1", 22, "mb1"),
+        ("red2", 2, "02:00:00:01:02:12", "10.1.1.12/24", "10.1.1.1", 23, "mr2"),
+        ("red3", 2, "02:00:00:01:02:13", "10.1.2.13/24", "10.1.2.1", 24, "mr3"),
+        ("blue2", 2, "02:00:00:02:02:12", "10.1.1.12/24", "10.1.1.1", 25, "mb2")):
+    GUESTS[_n] = {"data_mac": _mac, "data_addr": _addr, "gw": _gw, "port": _n, "node": _node,
+                  "mgmt_mac": f"02:00:00:00:02:{_mip:02x}", "mgmt_addr": f"10.99.0.{_mip}/24",
+                  "mgmt_tap": _mtap}
 for _n, _g in GUESTS.items():
     _g["name"] = _n
 

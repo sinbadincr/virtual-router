@@ -7,13 +7,45 @@ KVM_MGMT_NS=mvr-mgmt
 KVM_RUN=/run/mvr-kvm
 KVM_OUT="$ROOT/build/lab/kvm"
 KVM_LOGS="$KVM_OUT/logs"
-KVM_GUESTS=(vm1 vm2 vm3)
-declare -A KVM_PORT=([vm1]=p1 [vm2]=p2 [vm3]=p3)
-declare -A KVM_PORT_MAC=([vm1]=02:00:00:00:00:01 [vm2]=02:00:00:00:00:02 [vm3]=02:00:00:00:00:03)
-declare -A KVM_MTAP=([vm1]=m1 [vm2]=m2 [vm3]=m3)
-declare -A KVM_MGMT_IP=([vm1]=10.99.0.11 [vm2]=10.99.0.12 [vm3]=10.99.0.13)
-declare -A KVM_DATA_MAC=([vm1]=02:00:00:00:01:01 [vm2]=02:00:00:00:01:02 [vm3]=02:00:00:00:01:03)
-declare -A KVM_DATA_ADDR=([vm1]=10.0.1.11/24 [vm2]=10.0.1.12/24 [vm3]=10.0.2.13/24)
+# Guest table of the active topology (kvm_use_topo): single = vm1..3 behind mvr-cn1 (unchanged);
+# overlay = red1 blue1 (mvr-cn1) red2 red3 blue2 (mvr-cn2), the table in lab/overlay/overlay.sh.
+KVM_ALL_GUESTS=(vm1 vm2 vm3 red1 blue1 red2 red3 blue2)
+KVM_GUESTS=()
+KVM_NODES=()
+declare -A KVM_NODE_NS KVM_PORT KVM_PORT_MAC KVM_MTAP KVM_MGMT_IP KVM_DATA_MAC KVM_DATA_ADDR
+KVM_MIN_MB=768
+
+kvm_use_topo() { # single | overlay
+  KVM_GUESTS=(); KVM_NODES=()
+  KVM_NODE_NS=(); KVM_PORT=(); KVM_PORT_MAC=(); KVM_MTAP=(); KVM_MGMT_IP=(); KVM_DATA_MAC=(); KVM_DATA_ADDR=()
+  if [ "$1" = overlay ]; then
+    local spec name node mac addr gw pmac mip mtap
+    KVM_NODES=(mvr-cn1 mvr-cn2)
+    KVM_MIN_MB=1280
+    for spec in "${OV_GUESTS[@]}"; do
+      read -r name node mac addr gw pmac mip mtap <<<"$spec"
+      KVM_GUESTS+=("$name")
+      KVM_NODE_NS[$name]=mvr-cn$node
+      KVM_PORT[$name]=$name
+      KVM_PORT_MAC[$name]=$pmac
+      KVM_MTAP[$name]=$mtap
+      KVM_MGMT_IP[$name]=$mip
+      KVM_DATA_MAC[$name]=$mac
+      KVM_DATA_ADDR[$name]=$addr
+    done
+  else
+    KVM_NODES=($CN)
+    KVM_MIN_MB=768
+    KVM_GUESTS=(vm1 vm2 vm3)
+    KVM_NODE_NS=([vm1]=$CN [vm2]=$CN [vm3]=$CN)
+    KVM_PORT=([vm1]=p1 [vm2]=p2 [vm3]=p3)
+    KVM_PORT_MAC=([vm1]=02:00:00:00:00:01 [vm2]=02:00:00:00:00:02 [vm3]=02:00:00:00:00:03)
+    KVM_MTAP=([vm1]=m1 [vm2]=m2 [vm3]=m3)
+    KVM_MGMT_IP=([vm1]=10.99.0.11 [vm2]=10.99.0.12 [vm3]=10.99.0.13)
+    KVM_DATA_MAC=([vm1]=02:00:00:00:01:01 [vm2]=02:00:00:00:01:02 [vm3]=02:00:00:00:01:03)
+    KVM_DATA_ADDR=([vm1]=10.0.1.11/24 [vm2]=10.0.1.12/24 [vm3]=10.0.2.13/24)
+  fi
+}
 
 # ---- image (R2) -------------------------------------------------------------------------------
 # shellcheck source=lab/kvm/image.lock
@@ -72,13 +104,13 @@ kvm_tap() { # ns name mac [master]
 }
 
 kvm_net_up() {
-  local ns vm port
-  for ns in $CN $KVM_MGMT_NS; do
+  local ns vm port node
+  for ns in "${KVM_NODES[@]}" $KVM_MGMT_NS; do
     ns_exists "$ns" || ip netns add "$ns"
     nsx "$ns" ip link set lo up
   done
-  # phase 1 isolation of the compute node
-  nsx $CN sysctl -qw net.ipv4.ip_forward=0
+  # phase 1 isolation of every compute node
+  for ns in "${KVM_NODES[@]}"; do nsx "$ns" sysctl -qw net.ipv4.ip_forward=0; done
   # management namespace: IPv6 off before any device exists, so every device inherits it
   nsx $KVM_MGMT_NS sysctl -qw net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1 \
     || echo "warning: cannot disable IPv6 in $KVM_MGMT_NS" >&2
@@ -89,11 +121,12 @@ kvm_net_up() {
   nsx $KVM_MGMT_NS ip link set br0 up
   for vm in "${KVM_GUESTS[@]}"; do
     port=${KVM_PORT[$vm]}
-    kvm_tap $CN "$port" "${KVM_PORT_MAC[$vm]}"
-    nsx $CN sysctl -qw "net.ipv4.conf.$port.arp_ignore=8"
-    nsx $CN sysctl -qw "net.ipv6.conf.$port.disable_ipv6=1" || echo "warning: cannot disable IPv6 on $CN/$port" >&2
-    no_offload $CN "$port"
-    nsx $CN ip link set "$port" up
+    node=${KVM_NODE_NS[$vm]}
+    kvm_tap "$node" "$port" "${KVM_PORT_MAC[$vm]}"
+    nsx "$node" sysctl -qw "net.ipv4.conf.$port.arp_ignore=8"
+    nsx "$node" sysctl -qw "net.ipv6.conf.$port.disable_ipv6=1" || echo "warning: cannot disable IPv6 on $node/$port" >&2
+    no_offload "$node" "$port"
+    nsx "$node" ip link set "$port" up
     kvm_tap $KVM_MGMT_NS "${KVM_MTAP[$vm]}" "" br0
     nsx $KVM_MGMT_NS ip link set "${KVM_MTAP[$vm]}" up
   done
@@ -178,7 +211,7 @@ kvm_boot() { # vmN
   : >"$KVM_LOGS/$vm.console.log"
   chown -R "$uid:$gid" "$KVM_OUT"
   setsid "$ROOT/lab/kvm/launch.py" --name "$vm" --uid "$uid" --gid "$gid" \
-    --cn-netns $CN --data-tap "${KVM_PORT[$vm]}" \
+    --cn-netns "${KVM_NODE_NS[$vm]}" --data-tap "${KVM_PORT[$vm]}" \
     --mgmt-netns $KVM_MGMT_NS --mgmt-tap "${KVM_MTAP[$vm]}" \
     --pidfile "$KVM_RUN/$vm.pid" --console "$KVM_LOGS/$vm.console.log" \
     --disk "$dir/disk.qcow2" --config-drive "$dir/config-2.iso" \
@@ -230,10 +263,11 @@ kvm_wait_all() { # vm...
 kvm_stop() {
   local f vm
   shopt -s nullglob
-  for f in "$KVM_RUN"/vm*.pid; do
+  for f in "$KVM_RUN"/*.pid; do
     vm=$(basename "$f" .pid)
     kvm_stop_guest "$vm"
   done
-  rm -rf "$KVM_RUN" "$KVM_OUT"/vm*
+  for vm in "${KVM_ALL_GUESTS[@]}"; do rm -rf "$KVM_OUT/$vm"; done
+  rm -rf "$KVM_RUN"
   shopt -u nullglob
 }

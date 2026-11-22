@@ -25,6 +25,24 @@ void stats_drop_port(uint8_t port, enum drop_reason r) {
         g_stats.port[port].drops++;
 }
 
+void stats_node_encap(uint8_t node, enum encap_kind k, uint64_t bytes) {
+    if (node > NODE_UNKNOWN || k >= ENCAP_COUNT)
+        return;
+    g_stats.node[node].encap[k].pkts++;
+    g_stats.node[node].encap[k].bytes += bytes;
+}
+
+void stats_node_decap(uint8_t node, enum encap_kind k, uint64_t bytes) {
+    if (node > NODE_UNKNOWN || k >= ENCAP_COUNT)
+        return;
+    g_stats.node[node].decap[k].pkts++;
+    g_stats.node[node].decap[k].bytes += bytes;
+}
+
+const char *stats_encap_name(enum encap_kind k) {
+    return k == ENCAP_VXLAN ? "vxlan" : "mplsoudp";
+}
+
 void stats_clear(void) {
     memset(&g_stats, 0, sizeof g_stats);
 }

@@ -2,7 +2,9 @@
 # minivr lab: one compute-node namespace (mvr-cn1) + three KVM guests on TAP ports (default),
 # or, as the test harness behind `make e2e`, three VM namespaces over veth (up --harness).
 # Only objects named mvr-* are created or removed; the host NIC and root routes are never touched.
-# Usage: lab.sh up [--harness] | down | run [--config FILE] | status | snapshot | ssh VM [CMD] | console VM [-f]
+# With --topo overlay: two compute nodes (mvr-cn1, mvr-cn2) behind an emulated underlay (mvr-ul), see
+# specs/003-vrf-overlay-tunnels/contracts/lab-overlay.md.
+# Usage: lab.sh up [--harness] [--topo single|overlay] | down | run [--node N] [--config FILE] | status | snapshot | ssh VM [CMD] | console VM [-f]
 set -euo pipefail
 
 export PATH="$PATH:/usr/sbin:/sbin"
@@ -26,13 +28,40 @@ die() { echo "lab.sh: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" -eq 0 ] || die "must run as root (sudo)"; }
 ns_exists() { ip netns list | awk '{print $1}' | grep -qx "$1"; }
 nsx() { local ns=$1; shift; ip netns exec "$ns" "$@"; }
-# lab kind, derived from the namespaces (data-model.md): kvm | harness | none
+# lab kind, derived from the namespaces (data-model.md "Lab kind"):
+#   kvm | harness (single node, names unchanged since 004) | overlay/kvm | overlay/harness | none
 lab_mode() {
-  if ns_exists mvr-mgmt; then echo kvm; elif ns_exists mvr-vm1; then echo harness; else echo none; fi
+  if ns_exists mvr-cn2; then
+    if ns_exists mvr-mgmt; then echo overlay/kvm; else echo overlay/harness; fi
+  elif ns_exists mvr-mgmt; then echo kvm
+  elif ns_exists mvr-vm1; then echo harness
+  else echo none
+  fi
+}
+lab_kind() { lab_mode; }
+
+# the single-node messages are the 004 strings (the phase 1 suites assert them verbatim)
+kind_message() {
+  case "$1" in
+    kvm) echo "KVM lab is up" ;;
+    harness) echo "namespace test harness is up" ;;
+    *) echo "$1 lab is up" ;;
+  esac
+}
+# Exactly one lab kind at a time: refuse (exit 1) when another kind is up.
+refuse_other_kind() { # wanted-kind
+  local cur
+  cur=$(lab_mode)
+  if [ "$cur" != none ] && [ "$cur" != "$1" ]; then
+    die "$(kind_message "$cur"); run 'sudo make lab-clean' first"
+  fi
 }
 
 # shellcheck source=lab/kvm/kvm.sh
 . "$ROOT/lab/kvm/kvm.sh"
+# shellcheck source=lab/overlay/overlay.sh
+. "$ROOT/lab/overlay/overlay.sh"
+kvm_use_topo single
 
 # Refuse to continue if a root-namespace link with a lab name is not one of ours (a veth).
 check_collisions() {
@@ -66,7 +95,7 @@ PY
 
 lab_up_harness() {
   need_root
-  [ "$(lab_mode)" != kvm ] || die "KVM lab is up; run 'sudo make lab-clean' first"
+  refuse_other_kind harness
   check_collisions
   local ns
   for ns in $CN $(for v in "${VMS[@]}"; do echo "${v%% *}"; done); do
@@ -113,7 +142,7 @@ lab_up_kvm() {
     echo "lab.sh: run via sudo from your own user; QEMU never runs as root" >&2
     exit 2
   fi
-  [ "$(lab_mode)" != harness ] || die "namespace test harness is up; run 'sudo make lab-clean' first"
+  refuse_other_kind kvm
   avail=$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)
   # guests already running hold their memory; only demand it when nothing is up yet
   if [ -z "$(for vm in "${KVM_GUESTS[@]}"; do kvm_pid "$vm"; done)" ] && [ "$avail" -lt 768 ]; then
@@ -143,10 +172,19 @@ lab_up_kvm() {
   echo "lab up (kvm): $CN + vm1..3, mgmt $KVM_MGMT_NS"
 }
 
+# every forwarder of the lab: minivrd.pid (single) and minivrd-cn1/-cn2.pid (overlay)
 stop_forwarder() {
-  [ -f "$PIDFILE" ] || return 0
+  local f
+  shopt -s nullglob
+  for f in "$LAB_OUT"/minivrd.pid "$LAB_OUT"/minivrd-cn?.pid; do stop_forwarder_file "$f"; done
+  shopt -u nullglob
+}
+
+stop_forwarder_file() { # pidfile
+  local pidfile=$1
+  [ -f "$pidfile" ] || return 0
   local pid
-  pid=$(cat "$PIDFILE")
+  pid=$(cat "$pidfile")
   if [ -n "$pid" ] && [ -d "/proc/$pid" ] && grep -q minivrd "/proc/$pid/comm" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     local i
@@ -156,7 +194,7 @@ stop_forwarder() {
       kill -KILL "$pid" 2>/dev/null || true
     fi
   fi
-  rm -f "$PIDFILE"
+  rm -f "$pidfile"
 }
 
 lab_down() {
@@ -170,11 +208,12 @@ lab_down() {
   for link in $(ip -j link show | jq -r '.[].ifname | select(startswith("mvr-"))'); do
     ip link del "$link" 2>/dev/null || true
   done
-  rm -rf "$RUN_DIR"
+  rm -rf "$RUN_DIR" /run/mvr-cn1 /run/mvr-cn2
   echo "lab down"
 }
 
 lab_run() {
+  case "$(lab_mode)" in overlay/*) lab_run_overlay "$@"; return ;; esac
   need_root
   local config="$ROOT/lab/cn1.conf"
   while [ $# -gt 0 ]; do
@@ -187,7 +226,7 @@ lab_run() {
   local bin="$ROOT/build/$BUILD/minivrd" ctl="$ROOT/build/$BUILD/vrctl"
   [ -x "$bin" ] && [ -x "$ctl" ] || die "build first: cmake --preset $BUILD && cmake --build --preset $BUILD"
   ns_exists $CN || die "lab is not up (run: sudo make lab)"
-  stop_forwarder
+  stop_forwarder_file "$PIDFILE"
   mkdir -p "$LAB_OUT"
   echo "identity minivrd=$(sha256sum "$bin" | awk '{print $1}') config=$(sha256sum "$config" | awk '{print $1}') mode=$(lab_mode)" >>"$LOGFILE"
   rm -rf "$RUN_DIR"
@@ -219,9 +258,20 @@ lab_status() {
     nsx "$ns" ip -brief addr show | grep -v '^lo ' | grep -v UNKNOWN || true
   done
   if [ -f "$PIDFILE" ] && [ -d "/proc/$(cat "$PIDFILE")" ]; then pid=$(cat "$PIDFILE"); fi
-  echo "forwarder pid: $pid"
-  if [ "$(lab_mode)" = kvm ]; then
-    echo "== guests (mode kvm)"
+  case "$(lab_mode)" in
+    overlay/*)
+      local n
+      for n in cn1 cn2; do
+        pid=none
+        f="$LAB_OUT/minivrd-$n.pid"
+        if [ -f "$f" ] && [ -d "/proc/$(cat "$f")" ]; then pid=$(cat "$f"); fi
+        echo "forwarder $n pid: $pid"
+      done ;;
+    *) echo "forwarder pid: $pid" ;;
+  esac
+  case "$(lab_mode)" in overlay/*) kvm_use_topo overlay ;; esac
+  if [ "$(lab_mode)" = kvm ] || [ "$(lab_mode)" = overlay/kvm ]; then
+    echo "== guests (mode $(lab_mode))"
     printf '%-5s %-8s %-6s %-5s %-18s %-13s %-12s %s\n' NAME STATE PID PORT MAC DATA MGMT CONSOLE
     local vm
     for vm in "${KVM_GUESTS[@]}"; do
@@ -233,13 +283,17 @@ lab_status() {
 }
 
 kvm_vm_arg() { # validate a guest name
-  case "${1:-}" in vm1|vm2|vm3) ;; *) die "usage: $0 ssh|console vm1|vm2|vm3 ..." ;; esac
+  case "${1:-}" in
+    vm1|vm2|vm3|red1|blue1|red2|red3|blue2) ;;
+    *) die "usage: $0 ssh|console vm1|vm2|vm3 (single) or red1|blue1|red2|red3|blue2 (overlay) ..." ;;
+  esac
+  case "$(lab_mode)" in overlay/*) kvm_use_topo overlay ;; esac
 }
 
 lab_ssh() {
   need_root
   kvm_vm_arg "${1:-}"
-  [ "$(lab_mode)" = kvm ] || die "KVM lab is not up (run: sudo make lab)"
+  case "$(lab_mode)" in kvm|overlay/kvm) ;; *) die "KVM lab is not up (run: sudo make lab)" ;; esac
   local vm=$1; shift
   kvm_ssh "$vm" "$@"
 }
@@ -265,18 +319,34 @@ lab_snapshot() {
         --argjson netns "$nets" '{link: $link, addr: $addr, route: $r4, route6: $r6, netns: $netns}'
 }
 
+lab_up() {
+  local harness=0 topo=single interop=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --harness) harness=1; shift ;;
+      --topo) [ $# -ge 2 ] || { echo "usage: $0 up [--harness] [--topo single|overlay] [--interop]" >&2; exit 2; }
+              topo=$2; shift 2 ;;
+      --interop) interop=1; shift ;;
+      *) echo "usage: $0 up [--harness] [--topo single|overlay] [--interop]" >&2; exit 2 ;;
+    esac
+  done
+  case "$topo" in single|overlay) ;; *) echo "usage: $0 up [--harness] [--topo single|overlay] [--interop]" >&2; exit 2 ;; esac
+  [ $interop -eq 0 ] || [ "$topo" = overlay ] || { echo "lab.sh: --interop needs --topo overlay" >&2; exit 2; }
+  if [ "$topo" = overlay ]; then
+    if [ $harness -eq 1 ]; then lab_up_overlay_harness; else lab_up_overlay_kvm; fi
+    [ $interop -eq 0 ] || lab_interop_up
+  else
+    if [ $harness -eq 1 ]; then lab_up_harness; else lab_up_kvm; fi
+  fi
+}
+
 case "${1:-}" in
-  up)
-    case "${2:-}" in
-      "") lab_up_kvm ;;
-      --harness) lab_up_harness ;;
-      *) echo "usage: $0 up [--harness]" >&2; exit 2 ;;
-    esac ;;
+  up) shift; lab_up "$@" ;;
   down) lab_down ;;
   run) shift; lab_run "$@" ;;
   status) lab_status ;;
   snapshot) lab_snapshot ;;
   ssh) shift; lab_ssh "$@" ;;
   console) shift; lab_console "$@" ;;
-  *) echo "usage: $0 up [--harness] | down | run [--config FILE] | status | snapshot | ssh VM [CMD...] | console VM [-f]" >&2; exit 2 ;;
+  *) echo "usage: $0 up [--harness] [--topo single|overlay] [--interop] | down | run [--node cn1|cn2] [--config FILE] | status | snapshot | ssh VM [CMD...] | console VM [-f]" >&2; exit 2 ;;
 esac

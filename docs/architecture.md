@@ -1,4 +1,4 @@
-# minivr architecture (phase 1)
+# minivr architecture (phases 1 and 2)
 
 `minivrd` is a single-threaded, run-to-completion L3 forwarder. `vrctl` is its CLI. Everything
 below describes what is built, not what is planned; see `specs/001-lab-l3-forwarder/` for the
@@ -106,3 +106,75 @@ performance claims.
   every veth end. A forwarder on a real NIC would instead complete the checksum itself.
 - The kernel strips 802.1Q tags before a raw socket sees the frame; the backend asks for
   `PACKET_AUXDATA` to know it happened.
+
+# Phase 2: VRFs and overlay tunnels
+
+Phase 2 turns the single-table router into a multi-tenant one that reaches VMs on other compute
+nodes through tunnels. The phase 1 pipeline above is unchanged for a lab that only uses the
+`default` VRF. Decisions: `specs/003-vrf-overlay-tunnels/research.md` (R1 to R13).
+
+## Tables
+
+| Structure | Where | Size | Notes |
+|---|---|---|---|
+| VRF table | `dp/vrf.c` | 64 (`default` = id 0) | each VRF owns one root in the LPM pool |
+| LPM node pool | `dp/lpm_trie.c` | 10,000 rules x 32 levels + 64 roots, allocated once | **one pool, one root per VRF**: memory stays at the phase 1 size and "10,000 routes" is a total across tenants |
+| route array | `dp/route.c` | 10,000 | indexed by the trie value; entry = `(vrf, prefix, len)` + next hop `LOCAL {port, gateway}` or `REMOTE {node, encap, tag}` |
+| neighbour table | `dp/neigh.c` | 2,048 slots, 1,024 entries | key `(table, ip)`; table = VRF id or `NEIGH_UNDERLAY` (255); the whole FSM (hold <= 3, retries, 1 s deadline) serves the underlay too |
+| ports | `dp/port.c` | 16 VM + 1 underlay | `role`, `vrf`; a gateway address may repeat across VRFs |
+| remote nodes | `dp/tunnel.c` | 64 | name, underlay IP, router MAC; counters in `g_stats.node[id]` (+ `unknown`) |
+| label map | `dp/tunnel.c` | 1,024 in a 2,048-slot hash with tombstones | MPLS label -> one VM port |
+| VNI map | `dp/tunnel.c` | 64, linear scan | VXLAN VNI -> one VRF |
+
+Everything is a fixed array: nothing is allocated on the packet path and the tables are mutated
+only by the single loop between bursts.
+
+## Transmit path (`dp/encap.c`)
+
+```
+VM port ingress -> phase 1 checks -> LPM in port.vrf -> REMOTE {node, encap, tag}
+   TTL <= 1 -> time exceeded                                   (as phase 1)
+   underlay down -> port_down
+   inner length + overhead (32 | 50) > underlay MTU
+        -> DF: ICMP frag needed (MTU - overhead), drop(tunnel_mtu_exceeded)
+   TTL-- once, flow hash over (src, dst, proto, ports)
+   MPLSoUDP: drop the inner Ethernet header, prepend Eth|IPv4(DF,TTL 64,ID 0)|UDP 6635|label
+   VXLAN   : inner Ethernet becomes (own router MAC -> remote router MAC), prepend Eth|IPv4|UDP 4789|VXLAN
+        both in place in the 128-byte mbuf headroom: the inner packet is never copied
+   UDP source port = 49152 + hash % 16384 (one flow, one underlay path), UDP checksum 0
+   underlay neighbour of the node: REACHABLE -> tx on u0;  unresolved -> hold (the frame is already
+   encapsulated, only its destination MAC is missing) and ARP; 1 s deadline -> neighbour_unresolved
+   and ICMP host unreachable to the VM (the mbuf remembers the tenant's source MAC and where the
+   inner header sits, so the error can still quote the original packet)
+```
+
+## Receive path (`dp/decap.c`)
+
+```
+underlay ingress -> Ethernet classify
+   ARP   : only the underlay table; answers for the node's own address; learns configured nodes only
+   IPv4  : phase 1 validation -> dst == own underlay IP (else tunnel_not_for_us)
+           ICMP echo request -> reply;  other protocols -> underlay_unexpected
+           UDP -> bad_udp | dport 4789 VXLAN | 6635 MPLS | else underlay_unexpected
+   VXLAN : header (bad_vxlan) -> VNI -> VRF (unknown_tag) -> inner Ethernet (bad_inner_l2)
+           -> inner IPv4 validation -> route in that VRF must be a host/connected route to a VM port
+              with a known neighbour (else decap_no_local_dest) -> rewrite MACs -> tx on the VM port
+   MPLS  : entry (bad_mpls) -> label -> port (unknown_tag) -> inner IPv4 validation
+           -> inner destination must equal the address bound to that port (decap_no_local_dest)
+   inner TTL is NOT decremented; per-source-node decap counters (unknown source -> `unknown`)
+```
+
+Nothing received on the underlay is ever forwarded back out (no transit, FR-015), and ARP on the
+underlay never touches a tenant table (FR-010).
+
+## Why per-interface labels, and why the router MAC
+
+Tungsten Fabric's vRouter allocates one MPLS label per VM interface: the label alone says which
+interface gets the packet, so the receiver needs no route lookup and a label can never deliver
+to a VM of the wrong tenant (the binding check also requires the inner destination to be that
+interface's address). The price is one `/32` remote route per remote VM on the sender, which is
+what a controller programs (phase 3). VXLAN is used the way EVPN uses it for symmetric routing:
+the VNI names the VRF and the inner Ethernet header carries the *router* MAC of the next hop,
+because there is no L2 segment to learn from. The router MAC of a node is its underlay port's MAC,
+so there is no extra address to invent and the Linux kernel's VXLAN device interoperates with a
+static FDB and permanent neighbour entries (`lab/overlay/interop.sh`).

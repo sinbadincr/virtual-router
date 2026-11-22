@@ -15,6 +15,11 @@ struct mbuf {
     uint8_t in_port;
     uint8_t allocated;
     uint8_t vlan_tagged; /* an 802.1Q tag was stripped by the kernel before we saw the frame */
+    /* Set by encap.c: the frame is a tunnel packet. inner_off = offset from the frame start to the
+     * inner IPv4 header, src_mac = Ethernet source of the original (tenant) frame, kept so an ICMP
+     * error for a held packet can still be built after the outer headers replaced them. */
+    uint16_t inner_off;
+    uint8_t src_mac[6];
     _Alignas(64) uint8_t buf[MBUF_DATA_SIZE];
 };
 

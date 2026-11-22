@@ -29,16 +29,21 @@ static struct {
     uint8_t mac[6];
 } binding[MAX_PORTS];
 
-static unsigned hash(uint32_t ip) {
-    return (ip * 2654435761u) >> (32 - 11);
+static unsigned hash(uint8_t table, uint32_t ip) {
+    return ((ip ^ ((uint32_t)table * 0x9e3779b9u)) * 2654435761u) >> (32 - 11);
 }
 
-static struct neigh *find(uint32_t ip) {
-    unsigned i = hash(ip);
+/* The neighbour table a port's traffic uses. */
+static uint8_t table_of(const struct port *p) {
+    return p->role == PORT_UNDERLAY ? NEIGH_UNDERLAY : p->vrf;
+}
+
+static struct neigh *find(uint8_t table, uint32_t ip) {
+    unsigned i = hash(table, ip);
     for (unsigned n = 0; n < NEIGH_SLOTS; n++, i = (i + 1) & (NEIGH_SLOTS - 1)) {
         if (tab[i].slot == SLOT_EMPTY)
             return NULL;
-        if (tab[i].slot == SLOT_USED && tab[i].ip == ip)
+        if (tab[i].slot == SLOT_USED && tab[i].ip == ip && tab[i].table == table)
             return &tab[i];
     }
     return NULL;
@@ -53,23 +58,24 @@ static void rehash(void) {
     memset(tab, 0, sizeof tab);
     tombs = 0;
     for (unsigned k = 0; k < n; k++) {
-        unsigned i = hash(tmp[k].ip);
+        unsigned i = hash(tmp[k].table, tmp[k].ip);
         while (tab[i].slot == SLOT_USED)
             i = (i + 1) & (NEIGH_SLOTS - 1);
         tab[i] = tmp[k];
     }
 }
 
-static struct neigh *insert(uint32_t ip) {
+static struct neigh *insert(uint8_t table, uint32_t ip) {
     if (tombs > NEIGH_SLOTS / 4)
         rehash();
-    unsigned i = hash(ip);
+    unsigned i = hash(table, ip);
     while (tab[i].slot == SLOT_USED)
         i = (i + 1) & (NEIGH_SLOTS - 1);
     if (tab[i].slot == SLOT_TOMB)
         tombs--;
     memset(&tab[i], 0, sizeof tab[i]);
     tab[i].slot = SLOT_USED;
+    tab[i].table = table;
     tab[i].ip = ip;
     used++;
     return &tab[i];
@@ -95,7 +101,10 @@ static void release_hold(struct neigh *n, const uint8_t *mac, enum drop_reason w
         if (mac && eg) {
             uint8_t *f = mbuf_data(m);
             memcpy(f, mac, ETH_ALEN);
-            memcpy(f + 6, eg->mac, ETH_ALEN);
+            /* underlay: the held frame is already fully encapsulated, only the outer
+             * destination MAC was unknown */
+            if (n->table != NEIGH_UNDERLAY)
+                memcpy(f + 6, eg->mac, ETH_ALEN);
             fwd_tx_now(n->port, m);
         } else {
             stats_drop_port(m->in_port, why);
@@ -107,8 +116,8 @@ static void release_hold(struct neigh *n, const uint8_t *mac, enum drop_reason w
     }
 }
 
-const struct neigh *neigh_lookup(uint32_t ip) {
-    return find(ip);
+const struct neigh *neigh_lookup(unsigned table, uint32_t ip) {
+    return table > 255 ? NULL : find((uint8_t)table, ip);
 }
 
 bool neigh_binding(uint8_t port, uint32_t *ip, uint8_t mac[6]) {
@@ -127,7 +136,10 @@ int neigh_add_static(uint32_t ip, const uint8_t mac[6], uint8_t port, struct cmd
     struct port *p = port_get(port);
     if (!p)
         return cmd_fail(err, "unknown-port", "no such port");
-    struct neigh *old = find(ip);
+    if (p->role != PORT_VM)
+        return cmd_fail(err, "bad-syntax", "static neighbours belong to VM ports");
+    uint8_t table = table_of(p);
+    struct neigh *old = find(table, ip);
     if (old && old->kind == NEIGH_STATIC)
         return cmd_fail(err, "exists", "static neighbour %u.%u.%u.%u already exists", ip >> 24,
                         (ip >> 16) & 255, (ip >> 8) & 255, ip & 255);
@@ -135,13 +147,13 @@ int neigh_add_static(uint32_t ip, const uint8_t mac[6], uint8_t port, struct cmd
         return cmd_fail(err, "exists", "port %s already has a static neighbour", p->name);
     if (!old && used >= NEIGH_CAPACITY)
         return cmd_fail(err, "table-full", "neighbour table full (%d)", NEIGH_CAPACITY);
-    if (route_add_host(ip, port, err) != 0)
+    if (route_add_host(table, ip, port, err) != 0)
         return -1;
     if (old) { /* a learned/incomplete entry is replaced by the static one */
         release_hold(old, NULL, DROP_NEIGHBOUR_UNRESOLVED, false);
         erase(old);
     }
-    struct neigh *n = insert(ip);
+    struct neigh *n = insert(table, ip);
     memcpy(n->mac, mac, 6);
     n->port = port;
     n->kind = NEIGH_STATIC;
@@ -152,13 +164,13 @@ int neigh_add_static(uint32_t ip, const uint8_t mac[6], uint8_t port, struct cmd
     return 0;
 }
 
-int neigh_del(uint32_t ip, struct cmd_err *err) {
-    struct neigh *n = find(ip);
+int neigh_del(unsigned table, uint32_t ip, struct cmd_err *err) {
+    struct neigh *n = table > 255 ? NULL : find((uint8_t)table, ip);
     if (!n)
         return cmd_fail(err, "not-found", "no such neighbour");
     release_hold(n, NULL, DROP_NEIGHBOUR_UNRESOLVED, false);
     if (n->kind == NEIGH_STATIC) {
-        route_del_host(ip);
+        route_del_host(n->table, ip);
         binding[n->port].bound = false;
     }
     erase(n);
@@ -166,7 +178,11 @@ int neigh_del(uint32_t ip, struct cmd_err *err) {
 }
 
 enum neigh_res neigh_resolve(uint32_t ip, uint8_t port, struct mbuf *m, uint8_t mac[6]) {
-    struct neigh *n = find(ip);
+    const struct port *ep = port_get(port);
+    if (!ep)
+        return NEIGH_DROP;
+    uint8_t table = table_of(ep);
+    struct neigh *n = find(table, ip);
     uint64_t now = clock_now_ns();
     if (n && n->state == NEIGH_REACHABLE) {
         memcpy(mac, n->mac, 6);
@@ -179,7 +195,7 @@ enum neigh_res neigh_resolve(uint32_t ip, uint8_t port, struct mbuf *m, uint8_t 
             g_stats.neighbour_table_full++;
             return NEIGH_DROP;
         }
-        n = insert(ip);
+        n = insert(table, ip);
         n->port = port;
         n->kind = NEIGH_LEARNED;
         n->state = NEIGH_INCOMPLETE;
@@ -203,7 +219,11 @@ enum neigh_res neigh_resolve(uint32_t ip, uint8_t port, struct mbuf *m, uint8_t 
 void neigh_learn(uint32_t ip, const uint8_t mac[6], uint8_t port) {
     if (ip == 0 || (ip >> 28) == 0xe || ip == 0xffffffffu)
         return;
-    struct neigh *n = find(ip);
+    const struct port *lp = port_get(port);
+    if (!lp)
+        return;
+    uint8_t table = table_of(lp);
+    struct neigh *n = find(table, ip);
     if (n && n->kind == NEIGH_STATIC)
         return; /* learned never overwrites static */
     if (!n) {
@@ -211,7 +231,7 @@ void neigh_learn(uint32_t ip, const uint8_t mac[6], uint8_t port) {
             g_stats.neighbour_table_full++;
             return;
         }
-        n = insert(ip);
+        n = insert(table, ip);
         n->kind = NEIGH_LEARNED;
     }
     memcpy(n->mac, mac, 6);
@@ -254,12 +274,41 @@ void neigh_port_down(uint8_t port) {
     }
 }
 
-void neigh_gateway_removed(uint32_t gw) {
-    struct neigh *n = find(gw);
+void neigh_gateway_removed(unsigned table, uint32_t gw) {
+    struct neigh *n = table > 255 ? NULL : find((uint8_t)table, gw);
     if (n && n->kind == NEIGH_LEARNED && n->state != NEIGH_REACHABLE) {
         release_hold(n, NULL, DROP_NEIGHBOUR_UNRESOLVED, false);
         erase(n);
     }
+}
+
+void neigh_port_set_vrf(uint8_t port, uint8_t new_vrf) {
+    for (unsigned i = 0; i < NEIGH_SLOTS; i++) {
+        struct neigh *n = &tab[i];
+        if (n->slot != SLOT_USED || n->port != port)
+            continue;
+        if (n->kind == NEIGH_LEARNED) {
+            release_hold(n, NULL, DROP_NEIGHBOUR_UNRESOLVED, false);
+            erase(n);
+        }
+    }
+    /* the static entry is re-keyed: copy it out, erase, insert under the new table */
+    uint32_t ip;
+    uint8_t mac[6];
+    if (!neigh_binding(port, &ip, mac))
+        return;
+    struct neigh *old = NULL;
+    for (unsigned i = 0; i < NEIGH_SLOTS && !old; i++)
+        if (tab[i].slot == SLOT_USED && tab[i].port == port && tab[i].kind == NEIGH_STATIC)
+            old = &tab[i];
+    if (!old)
+        return;
+    erase(old);
+    struct neigh *n = insert(new_vrf, ip);
+    memcpy(n->mac, mac, 6);
+    n->port = port;
+    n->kind = NEIGH_STATIC;
+    n->state = NEIGH_REACHABLE;
 }
 
 void neigh_walk(neigh_walk_fn fn, void *arg) {

@@ -33,6 +33,11 @@ export MINIVR_SOCK=/run/mvr-cn1/minivr.sock
 sudo -E build/debug/vrctl route show
 sudo -E build/debug/vrctl -j stats show | jq .data.drops
 sudo make lab-clean                                # leaves the host network exactly as it was
+
+# phase 2: two compute nodes, tenants with overlapping addresses, MPLSoUDP and VXLAN tunnels
+sudo make lab TOPO=overlay && sudo make lab-run
+sudo lab/lab.sh ssh red1 ping -c3 10.1.1.12        # red1 on cn1 -> red2 on cn2 through MPLSoUDP, ttl=63
+sudo lab/lab.sh ssh blue1 ping -c3 10.1.1.12       # same address, other tenant, through VXLAN
 ```
 
 The lab needs KVM (`/dev/kvm`, usable by your user; run `sudo` from your own user). Without it
@@ -41,8 +46,11 @@ there is no fallback. Details: [`docs/kvm.md`](docs/kvm.md).
 
 `sudo make e2e` is the harness suite: forwarding, CLI, robustness corpus, privilege drop and crash
 drill, run on throw-away namespace VMs because it crafts frames no guest kernel would send; it
-needs no KVM. `sudo make e2e-kvm` runs the same behaviours that a guest can show, inside the KVM
-lab. Both compare the host network state before and after and are part of the merge gate, with
+needs no KVM. It then runs the phase 2 overlay suite (two compute nodes, VRFs, MPLSoUDP and VXLAN
+tunnels, isolation, malformed underlay traffic, the Linux VXLAN interop endpoint) on namespace
+VMs too. `sudo make e2e-kvm` runs the same behaviours that a guest can show, inside the KVM
+lab, and then the overlay suite on KVM guests. Both compare the host network state before and
+after and are part of the merge gate, with
 `make check`: GCC and Clang with `-Werror`, ctest plain and under ASan/UBSan, and the fast-path
 audit.
 
@@ -66,21 +74,22 @@ not line rate.
 | | |
 |---|---|
 | `docs/architecture.md` | event loop, packet path, data structures, mbuf lifecycle |
-| `docs/lab.md` | topology, addressing, commands, safety guarantees, the test harness |
+| `docs/lab.md` | topology, addressing, commands, safety guarantees, the test harness, the overlay lab |
+| `docs/overlay.md` | phase 2: packet walk of both tunnels with real captures, comparison with Tungsten Fabric and the Linux kernel |
 | `docs/kvm.md` | the KVM guests: prerequisites, wiring, images, troubleshooting |
 | `docs/cli.md` | every `vrctl` command, exit code, error code and JSON shape |
 | `docs/drop-reasons.md` | every named drop reason, its trigger and its test |
 | `docs/demo.md` | captured output of the scripted demo |
 | `docs/traceability.md` | each requirement and success criterion mapped to a test |
 | `incidents/` | post-mortems, starting with the forced-crash drill |
-| `specs/001-lab-l3-forwarder/`, `specs/004-kvm-default-lab/` | spec, plan, research decisions, data model, contracts, tasks |
+| `specs/001-lab-l3-forwarder/`, `specs/004-kvm-default-lab/`, `specs/003-vrf-overlay-tunnels/` | spec, plan, research decisions, data model, contracts, tasks |
 
 ## Layout
 
 `src/dp` forwarding logic (no syscalls), `src/pio` packet I/O backends, `src/ctl` command grammar
 and control socket, `src/daemon` the `minivrd` main/loop/privileges/crash/link monitor,
 `src/vrctl` the CLI, `lab/` lab scripts and shipped configs, `tests/unit` C unit tests,
-`tests/e2e` pytest + scapy harness suite, `tests/e2e_kvm` KVM suite. Third-party test dependencies: `THIRD_PARTY.md`.
+`tests/e2e` pytest + scapy harness suite, `tests/e2e_kvm` KVM suite, `tests/e2e_overlay` the phase 2 suite (both variants). Third-party test dependencies: `THIRD_PARTY.md`.
 
 ## Roadmap
 
@@ -88,12 +97,13 @@ and control socket, `src/daemon` the `minivrd` main/loop/privileges/crash/link m
 |---|---|---|
 | 1. Lab + L3 forwarder | Namespace lab (`mvr-cn1` + 3 VM namespaces, now the test harness); AF_PACKET/epoll forwarder with proxy ARP, anycast gateway, LPM trie, neighbour FSM, ICMP rate limit, anti-spoofing; `vrctl` CLI; privilege drop; crash dumps and post-mortem | **Done** |
 | 1.5. KVM lab | Real KVM guests (CirrOS, virtio-net) attached to `minivrd` through TAP ports, as nova/libvirt attach VMs to a vRouter; no forwarder changes; since feature 004 it is the default lab (`make lab`), the namespace VMs stay as the test harness (`lab.sh up --harness`); see [docs/kvm.md](docs/kvm.md) | **Done** |
-| 2. VRFs + overlay tunnels | Two compute nodes over an emulated underlay; tenants with overlapping addresses; MPLSoUDP (RFC 7510) and VXLAN (RFC 7348); interop with the Linux kernel VXLAN | Spec draft |
+| 2. VRFs + overlay tunnels | Two compute nodes over an emulated underlay; tenants with overlapping addresses; MPLSoUDP (RFC 7510) and VXLAN (RFC 7348); interop with the Linux kernel VXLAN; see [docs/overlay.md](docs/overlay.md) | **Implemented** (see `specs/003-vrf-overlay-tunnels/tasks.md`) |
 | 3. Agent + controller | Controller holding network state; per-node agent programming `minivrd` over a documented protocol, replacing static remote routes | Planned |
 | 4. Multi-core + DPDK + perf | Worker threads with RCU-updated tables, DIR-24-8 LPM; optional DPDK backend on virtual devices and vhost-user for KVM guests; benchmarks, perf and flame graphs in `docs/perf.md` | Planned |
 | 5. BGP EVPN + incidents | EVPN peering with FRR (type-5/type-2 routes); post-mortems of deliberately reproduced faults (races, use-after-free, deadlocks) | Planned |
 
 ## Status
 
-Phase 1 (single-node lab and L3 forwarder). Not claimed: performance (see Benchmarks),
-multi-core, tunnelling, IPv6, VLANs, ARP/neighbour aging. See the spec's assumptions.
+Phases 1, 1.5 and 2 (single-node lab, L3 forwarder, VRFs and overlay tunnels). Not claimed:
+performance (see Benchmarks), multi-core, a controller (routes and receive mappings are static),
+IPv6, VLANs, ARP/neighbour aging, tunnel authentication or encryption. See the specs' assumptions.

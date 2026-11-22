@@ -24,6 +24,17 @@
 #define IP_MF 0x2000
 #define IP_OFFMASK 0x1fff
 
+#define IPPROTO_UDP_ 17
+#define UDP_HDR_LEN 8
+#define UDP_PORT_VXLAN 4789 /* RFC 7348 */
+#define UDP_PORT_MPLS 6635  /* RFC 7510 */
+#define MPLS_LSE_LEN 4
+#define VXLAN_HDR_LEN 8
+#define VXLAN_FLAG_I 0x08
+/* bytes added around the inner IPv4 packet (data-model, contracts/wire-formats.md) */
+#define OVERHEAD_MPLSOUDP (IPV4_HDR_LEN + UDP_HDR_LEN + MPLS_LSE_LEN)                       /* 32 */
+#define OVERHEAD_VXLAN (IPV4_HDR_LEN + UDP_HDR_LEN + VXLAN_HDR_LEN + ETH_HDR_LEN)           /* 50 */
+
 #define ICMP_ECHO_REPLY 0
 #define ICMP_UNREACH 3
 #define ICMP_ECHO_REQUEST 8
@@ -91,4 +102,32 @@ int pkt_icmp_error_allowed(const uint8_t *frame, size_t len);
 size_t pkt_icmp_build_error(uint8_t *out, const uint8_t *orig, size_t orig_len,
                             const uint8_t eth_src[ETH_ALEN], uint32_t src_ip, uint8_t type,
                             uint8_t code, uint16_t mtu);
+
+/* ---- UDP (pkt_udp.c) ---- `udp` points at the UDP header, `avail` = bytes the IP payload holds ---- */
+struct udp_hdr {
+    uint16_t sport, dport, len; /* len = header + payload as stated by the sender */
+};
+/* 0, or -1 = bad_udp: fewer than 8 bytes, length < 8 or length > avail. Checksum is not checked
+ * (it is 0 on everything we emit, RFC 7348 / 7510 allow that for IPv4). */
+int pkt_udp_parse(const uint8_t *udp, size_t avail, struct udp_hdr *out);
+/* Writes sport/dport, length = 8 + payload_len and checksum 0. */
+void pkt_udp_build(uint8_t *out, uint16_t sport, uint16_t dport, uint16_t payload_len);
+
+/* ---- MPLS label stack entry (pkt_mpls.c), RFC 7510 (one label, S = 1) ---- */
+struct mpls_lse {
+    uint32_t label;
+    uint8_t tc, s, ttl;
+};
+int pkt_mpls_parse(const uint8_t *p, size_t avail, struct mpls_lse *out); /* 0, or -1 = bad_mpls */
+void pkt_mpls_build(uint8_t *out, uint32_t label, uint8_t ttl);           /* TC 0, S 1 */
+
+/* ---- VXLAN header (pkt_vxlan.c), RFC 7348 ---- */
+/* 0, or -1 = bad_vxlan: fewer than 8 bytes or I flag clear. Reserved bits are ignored. */
+int pkt_vxlan_parse(const uint8_t *p, size_t avail, uint32_t *vni);
+void pkt_vxlan_build(uint8_t *out, uint32_t vni);
+
+/* Flow hash of an IPv4 packet (src, dst, protocol and, for TCP/UDP, both ports): the same flow
+ * always hashes the same, which keeps one flow on one underlay path (FR-012). `ip` points at the
+ * IPv4 header of `avail` bytes. */
+uint32_t pkt_flow_hash(const uint8_t *ip, size_t avail);
 #endif

@@ -2,15 +2,14 @@
 
 #include <string.h>
 
-void lpm_init(struct lpm *t) {
+void lpm_pool_init(struct lpm_pool *t) {
     memset(&t->nodes[0], 0, sizeof t->nodes[0]);
-    memset(&t->nodes[1], 0, sizeof t->nodes[1]); /* root */
     t->free_head = 0;
-    t->next_unused = 2;
+    t->next_unused = 1;
     t->rules = 0;
 }
 
-static uint32_t node_new(struct lpm *t) {
+static uint32_t node_new(struct lpm_pool *t) {
     uint32_t i;
     if (t->free_head) {
         i = t->free_head;
@@ -24,20 +23,36 @@ static uint32_t node_new(struct lpm *t) {
     return i;
 }
 
-static void node_free(struct lpm *t, uint32_t i) {
+static void node_free(struct lpm_pool *t, uint32_t i) {
     t->nodes[i].child[0] = t->free_head;
     t->free_head = i;
+}
+
+int lpm_root_init(struct lpm_pool *t, struct lpm_root *r) {
+    uint32_t n = node_new(t);
+    if (!n)
+        return -2;
+    r->node = n;
+    r->rules = 0;
+    return 0;
+}
+
+void lpm_root_release(struct lpm_pool *t, struct lpm_root *r) {
+    if (r->node)
+        node_free(t, r->node);
+    r->node = 0;
+    r->rules = 0;
 }
 
 static unsigned bit(uint32_t ip, unsigned depth) {
     return (ip >> (31 - depth)) & 1u;
 }
 
-int lpm_add(struct lpm *t, uint32_t prefix, uint8_t len, uint32_t value) {
+int lpm_add(struct lpm_pool *t, struct lpm_root *r, uint32_t prefix, uint8_t len, uint32_t value) {
     if (len > 32)
         return -2;
     /* exact-match walk first, without creating anything */
-    uint32_t cur = 1;
+    uint32_t cur = r->node;
     unsigned d;
     for (d = 0; d < len; d++) {
         uint32_t next = t->nodes[cur].child[bit(prefix, d)];
@@ -61,15 +76,16 @@ int lpm_add(struct lpm *t, uint32_t prefix, uint8_t len, uint32_t value) {
     t->nodes[cur].has_value = 1;
     t->nodes[cur].value = value;
     t->rules++;
+    r->rules++;
     return 0;
 }
 
-int lpm_del(struct lpm *t, uint32_t prefix, uint8_t len) {
+int lpm_del(struct lpm_pool *t, struct lpm_root *r, uint32_t prefix, uint8_t len) {
     if (len > 32)
         return -1;
     uint32_t path[34];
     unsigned n = 0;
-    uint32_t cur = 1;
+    uint32_t cur = r->node;
     path[n++] = cur;
     for (unsigned d = 0; d < len; d++) {
         cur = t->nodes[cur].child[bit(prefix, d)];
@@ -81,6 +97,7 @@ int lpm_del(struct lpm *t, uint32_t prefix, uint8_t len) {
         return -1;
     t->nodes[cur].has_value = 0;
     t->rules--;
+    r->rules--;
     while (n > 1) {
         uint32_t node = path[n - 1], parent = path[n - 2];
         if (t->nodes[node].has_value || t->nodes[node].child[0] || t->nodes[node].child[1])
@@ -93,10 +110,10 @@ int lpm_del(struct lpm *t, uint32_t prefix, uint8_t len) {
     return 0;
 }
 
-int lpm_get(const struct lpm *t, uint32_t prefix, uint8_t len, uint32_t *value) {
+int lpm_get(const struct lpm_pool *t, const struct lpm_root *r, uint32_t prefix, uint8_t len, uint32_t *value) {
     if (len > 32)
         return 0;
-    uint32_t cur = 1;
+    uint32_t cur = r->node;
     for (unsigned d = 0; d < len; d++) {
         cur = t->nodes[cur].child[bit(prefix, d)];
         if (!cur)
@@ -108,8 +125,8 @@ int lpm_get(const struct lpm *t, uint32_t prefix, uint8_t len, uint32_t *value) 
     return 1;
 }
 
-int lpm_lookup(const struct lpm *t, uint32_t ip, uint32_t *value, uint8_t *len) {
-    uint32_t cur = 1;
+int lpm_lookup(const struct lpm_pool *t, const struct lpm_root *r, uint32_t ip, uint32_t *value, uint8_t *len) {
+    uint32_t cur = r->node;
     int hit = 0;
     for (unsigned d = 0;; d++) {
         if (t->nodes[cur].has_value) {
@@ -127,14 +144,14 @@ int lpm_lookup(const struct lpm *t, uint32_t ip, uint32_t *value, uint8_t *len) 
     return hit;
 }
 
-void lpm_walk(const struct lpm *t, lpm_walk_fn fn, void *arg) {
+void lpm_walk(const struct lpm_pool *t, const struct lpm_root *r, lpm_walk_fn fn, void *arg) {
     /* iterative pre-order: node, then 0-subtree, then 1-subtree */
     struct {
         uint32_t node, prefix;
         uint8_t depth;
     } stack[66];
     int sp = 0;
-    stack[sp].node = 1;
+    stack[sp].node = r->node;
     stack[sp].prefix = 0;
     stack[sp].depth = 0;
     sp++;
@@ -162,6 +179,10 @@ void lpm_walk(const struct lpm *t, lpm_walk_fn fn, void *arg) {
     }
 }
 
-uint32_t lpm_count(const struct lpm *t) {
+uint32_t lpm_count(const struct lpm_root *r) {
+    return r->rules;
+}
+
+uint32_t lpm_pool_count(const struct lpm_pool *t) {
     return t->rules;
 }
