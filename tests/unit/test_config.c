@@ -131,7 +131,9 @@ TEST(overlay_configs_parse_with_no_error) {
     CHECK_EQ_U64(ov_setup(1, 1600), 0);
     CHECK_EQ_U64(port_count(), 3); /* red1 blue1 u0 */
     CHECK_EQ_U64(vrf_count(), 3);
-    CHECK_EQ_U64(node_count(), 1);
+    CHECK_EQ_U64(node_count(), 2); /* cn2 and the interop endpoint `ix` */
+    CHECK(node_find("ix") != NULL && node_find("ix")->has_rmac);
+    CHECK(route_find(vrf_by_name("blue")->id, IP4(10, 1, 3, 33), 32) != NULL);
     CHECK_EQ_U64(label_count(), 1);
     CHECK_EQ_U64(vni_count(), 1);
     CHECK_EQ_U64(ratelimit_rate(), 100);

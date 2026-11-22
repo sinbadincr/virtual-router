@@ -165,5 +165,5 @@ lab_run_overlay() {
   echo "alias v1='$ctl -s /run/mvr-cn1/minivr.sock'; alias v2='$ctl -s /run/mvr-cn2/minivr.sock'"
 }
 
-# replaced by lab/overlay/interop.sh (US6)
-lab_interop_up() { die "--interop is not available yet"; }
+# shellcheck source=lab/overlay/interop.sh
+. "$ROOT/lab/overlay/interop.sh"

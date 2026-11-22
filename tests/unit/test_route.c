@@ -132,7 +132,7 @@ TEST(same_routes_in_two_vrfs_do_not_clash) {
     CHECK(route_lookup(red, IP4(10, 9, 0, 1)) != NULL);
     CHECK(route_lookup(blue, IP4(10, 9, 0, 1)) == NULL);
     CHECK_EQ_U64(route_count_vrf(red), 5); /* connected, host, 2 remote, 1 static */
-    CHECK_EQ_U64(route_count_vrf(blue), 3); /* connected, host, 1 remote */
+    CHECK_EQ_U64(route_count_vrf(blue), 4); /* connected, host, remote to cn2, remote to ix */
     ov_teardown();
 }
 

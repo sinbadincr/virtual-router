@@ -392,7 +392,7 @@ TEST(vrf_show_node_show_tunnel_show_shapes) {
     CHECK(cli("vrf show") == 0);
     CHECK(strstr(out, "{\"name\":\"default\",\"id\":0,\"ports\":[],\"routes\":0,\"neighbours\":0,\"labels\":0,\"vnis\":0}"));
     CHECK(strstr(out, "{\"name\":\"red\",\"id\":1,\"ports\":[\"red1\"],\"routes\":4,\"neighbours\":1,\"labels\":1,\"vnis\":0}"));
-    CHECK(strstr(out, "{\"name\":\"blue\",\"id\":2,\"ports\":[\"blue1\"],\"routes\":3,\"neighbours\":1,\"labels\":0,\"vnis\":1}"));
+    CHECK(strstr(out, "{\"name\":\"blue\",\"id\":2,\"ports\":[\"blue1\"],\"routes\":4,\"neighbours\":1,\"labels\":0,\"vnis\":1}"));
     CHECK(cli("node show") == 0);
     CHECK(strstr(out, "\"name\":\"cn2\",\"ip\":\"172.16.0.2\",\"rmac\":\"02:00:00:ff:00:02\",\"underlay_mac\":null,\"state\":\"unresolved\""));
     CHECK(strstr(out, "\"encap\":{\"mplsoudp\":{\"pkts\":0,\"bytes\":0},\"vxlan\":{\"pkts\":0,\"bytes\":0}},\"decap\":{"));
