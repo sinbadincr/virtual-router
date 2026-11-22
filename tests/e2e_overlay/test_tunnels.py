@@ -147,19 +147,28 @@ def test_underlay_down_drops_cross_node_only_and_recovers_without_restart(fresh)
 PAIRS = (("red1", "10.1.1.12"), ("red1", "10.1.2.13"), ("blue1", "10.1.1.12"))
 
 
-def _sweep(cap_expect):
-    for src, dst in PAIRS:
-        with Capture("udp", count=200) as cap:  # the first packets are enough to name the encapsulation
-            loss, ttls, out = vm(src).ping(dst, count=1000, interval=0.01, timeout=600)
+def _sweep(expect_tags):
+    """1,000 pings on each pair at once (three flows in parallel, each at the kernel's 20 ms pace)."""
+    res = {}
+
+    def run(src, dst):
+        res[(src, dst)] = vm(src).ping(dst, count=1000, interval=0.01, timeout=600)
+
+    with Capture("udp", count=900) as cap:
+        ts = [threading.Thread(target=run, args=pair) for pair in PAIRS]
+        [t.start() for t in ts]
+        [t.join(timeout=600) for t in ts]
+    for (src, dst), (loss, ttls, out) in res.items():
         assert loss == 0 and ttls == {"63"}, f"{src}->{dst}: {out[-300:]}"
-        kinds = {p["kind"] for p in tunnel_packets(cap)}
-        assert kinds == {cap_expect[src]}, f"{src}->{dst}: {kinds}"
-        assert_clean_underlay(cap)
+    assert len(res) == len(PAIRS)
+    tags = {(p["kind"], p.get("label") or p.get("vni")) for p in tunnel_packets(cap)}
+    assert tags == expect_tags, tags  # the encapsulation really in use, with the expected tags
+    assert_clean_underlay(cap)
 
 
 def test_sc002_thousand_pings_every_pair_with_each_encapsulation(fresh):
     # shipped config: red = MPLSoUDP, blue = VXLAN
-    _sweep({"red1": "mplsoudp", "blue1": "vxlan"})
+    _sweep({("mplsoudp", 1011), ("mplsoudp", 1012), ("mplsoudp", 1013), ("vxlan", 200)})
     # swap: red over VXLAN (vni 300), blue over MPLSoUDP (labels 2011/2012), on both nodes
     vc("cn1", "vni", "add", "300", "vrf", "red")
     vc("cn2", "vni", "add", "300", "vrf", "red")
@@ -170,7 +179,7 @@ def test_sc002_thousand_pings_every_pair_with_each_encapsulation(fresh):
     vc("cn2", "label", "add", "2012", "port", "blue2")
     vc("cn1", "route", "replace", "10.1.1.12/32", "vrf", "blue", "node", "cn2", "encap", "mplsoudp", "label", "2012")
     vc("cn2", "route", "replace", "10.1.1.11/32", "vrf", "blue", "node", "cn1", "encap", "mplsoudp", "label", "2011")
-    _sweep({"red1": "vxlan", "blue1": "mplsoudp"})
+    _sweep({("vxlan", 300), ("mplsoudp", 2011), ("mplsoudp", 2012)})
 
 
 # ---- SC-004: bulk transfer ----

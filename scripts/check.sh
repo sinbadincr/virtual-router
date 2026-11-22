@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Merge gate (constitution gates 1-2). Gate 3 is `sudo make e2e` (harness suite) plus
-# `sudo make e2e-kvm` (KVM suite; SKIP only on a host without /dev/kvm).
+# Merge gate (constitution gates 1-2). Gate 3 is `sudo make e2e` (the phase 1 harness suite, then
+# the phase 2 overlay suite on namespace VMs) plus `sudo make e2e-kvm` (the phase 1 KVM suite, then
+# the overlay suite on KVM guests; SKIP only on a host without /dev/kvm).
 set -u
 cd "$(dirname "$0")/.."
 fail=0
