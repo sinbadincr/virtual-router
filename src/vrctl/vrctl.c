@@ -9,7 +9,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "json_in.h"
+#include "minivr/json_in.h"
 #include "minivr/frame.h"
 
 #define EXIT_REJECTED 1

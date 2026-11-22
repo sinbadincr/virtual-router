@@ -6,13 +6,13 @@ target_link_libraries(pio_fake minivr_dp)
 
 # Daemon/CLI code with parsers that must be testable without sockets, root or a running daemon.
 add_library(unit_extras STATIC
-  ${CMAKE_SOURCE_DIR}/src/vrctl/json_in.c
+  ${CMAKE_SOURCE_DIR}/src/common/json_in.c
   ${CMAKE_SOURCE_DIR}/src/daemon/linkmon_parse.c
   ${CMAKE_SOURCE_DIR}/src/daemon/privdrop.c
   ${CMAKE_SOURCE_DIR}/src/ctl/config.c
   ${CMAKE_SOURCE_DIR}/src/ctl/fdcheck.c)
-target_include_directories(unit_extras PUBLIC ${CMAKE_SOURCE_DIR}/src/vrctl ${CMAKE_SOURCE_DIR}/src/daemon)
-target_link_libraries(unit_extras minivr_dp)
+target_include_directories(unit_extras PUBLIC ${CMAKE_SOURCE_DIR}/src/daemon)
+target_link_libraries(unit_extras minivr_ctrl minivr_dp)
 
 foreach(src ${UNIT_TESTS})
   get_filename_component(name ${src} NAME_WE)

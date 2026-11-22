@@ -166,3 +166,42 @@ TEST(phase1_config_parses_to_the_phase1_state) {
     CHECK(neigh_lookup(0, VM1_IP) != NULL);
     ov_teardown();
 }
+
+/* ---- phase 3 bootstrap configs (FR-002) and owner (FR-030) ---- */
+
+TEST(ctl_bootstrap_configs_parse_and_only_declare_the_underlay) {
+    static const char *const files[] = {"cn1", "cn2", "cn3"};
+    static const uint32_t ips[] = {0xac100001u, 0xac100002u, 0xac100004u};
+    for (int i = 0; i < 3; i++) {
+        char name[64], cfg[160];
+        ov_reset();
+        snprintf(name, sizeof name, "u%d", i);
+        uint8_t mac[6] = {2, 0, 0, 0xff, 0, (uint8_t)(i == 2 ? 4 : i + 1)};
+        pio_fake_add_if("u0", mac, 1500);
+        port_set_backend(&pio_fake_ops);
+        snprintf(cfg, sizeof cfg, MINIVR_SOURCE_DIR "/lab/ctl/%s.conf", files[i]);
+        CHECK(config_load(cfg) == 0);
+        CHECK_EQ_U64(port_count(), 1);
+        CHECK(port_underlay() != NULL);
+        CHECK_EQ_U64(port_underlay()->ip, ips[i]);
+        CHECK_EQ_U64(port_underlay()->owner, OWNER_CONFIG);
+        CHECK_EQ_U64(vrf_count(), 1);
+        CHECK_EQ_U64(node_count(), 0);
+        CHECK_EQ_U64(label_count(), 0);
+        fx_teardown();
+    }
+}
+
+TEST(earlier_phase_configs_still_parse_with_config_owner) {
+    CHECK(ov_setup(1, 1500) == 0);
+    CHECK(vrf_by_name("red") && vrf_by_name("red")->owner == OWNER_CONFIG);
+    CHECK(node_find("cn2") && node_find("cn2")->owner == OWNER_CONFIG);
+    CHECK(port_find("red1") && port_find("red1")->owner == OWNER_CONFIG);
+    CHECK_EQ_U64(label_owner(1011), OWNER_CONFIG);
+    CHECK_EQ_U64(vni_owner(200), OWNER_CONFIG);
+    const struct route *r = route_find(vrf_by_name("red")->id, 0x0a01010cu, 32);
+    CHECK(r && r->owner == OWNER_CONFIG);
+    const struct neigh *n = neigh_lookup(vrf_by_name("red")->id, 0x0a01010bu);
+    CHECK(n && n->owner == OWNER_CONFIG);
+    ov_teardown();
+}

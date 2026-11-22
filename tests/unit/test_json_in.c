@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "json_in.h"
+#include "minivr/json_in.h"
 #include "tharness.h"
 
 static struct jnode *parse(const char *s) {

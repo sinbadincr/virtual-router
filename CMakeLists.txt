@@ -16,8 +16,17 @@ endif()
 include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src/pio)
 
 file(GLOB DP_SRC CONFIGURE_DEPENDS src/common/*.c src/dp/*.c)
+# Phase 3 code that does I/O or belongs to libminivr_ctrl stays out of the data-plane library.
+list(FILTER DP_SRC EXCLUDE REGEX "/(nodestate|json_in|tcp|unixsock)\\.c$")
 set(DP_SRC ${DP_SRC} src/ctl/cmd.c src/ctl/frame.c)
 add_library(minivr_dp STATIC ${DP_SRC})
+
+# Pure control-plane library (phase 3): protocol codec, node-state sets, controller model/compute,
+# agent reconcile. No I/O, no syscalls, no heap (scripts/check-fastpath.sh enforces it).
+file(GLOB CTRL_SRC CONFIGURE_DEPENDS src/proto/*.c)
+set(CTRL_SRC ${CTRL_SRC} src/common/nodestate.c)
+add_library(minivr_ctrl STATIC ${CTRL_SRC})
+target_link_libraries(minivr_ctrl minivr_dp)
 
 file(GLOB DAEMON_SRC CONFIGURE_DEPENDS src/daemon/*.c src/pio/pio_afpacket.c
      src/ctl/config.c src/ctl/ctl_server.c src/ctl/fdcheck.c)
@@ -26,7 +35,7 @@ target_link_libraries(minivrd minivr_dp)
 target_link_options(minivrd PRIVATE -rdynamic) # symbol names in crash backtraces
 
 file(GLOB VRCTL_SRC CONFIGURE_DEPENDS src/vrctl/*.c)
-add_executable(vrctl ${VRCTL_SRC})
+add_executable(vrctl ${VRCTL_SRC} src/common/json_in.c)
 target_link_libraries(vrctl minivr_dp)
 
 enable_testing()
