@@ -175,4 +175,61 @@ Lab-script tests: `tests/e2e_kvm/test_kvm_lab.py`; classification check:
 
 ## Phase 2: VRFs and overlay tunnels (`specs/003-vrf-overlay-tunnels/spec.md`)
 
-_Filled in at the end of the feature (task T066)._
+Unit tests are in `tests/unit/` (ctest, also under ASan/UBSan); the overlay end-to-end suite is
+`tests/e2e_overlay/` and runs on both lab variants: namespace VMs (`sudo make e2e`, after the phase 1
+suite) and KVM guests (`sudo make e2e-kvm`). "O<n>" is a scenario of
+`specs/003-vrf-overlay-tunnels/quickstart.md`. Test names are abbreviated to their distinctive part.
+
+| FR | Requirement (short) | Covered by |
+|---|---|---|
+| FR-001 | one command builds the two-node overlay lab | `test_overlay_lifecycle::test_lifecycle_*`, `test_overlay_lab::test_topology_matches_contract` (O1) |
+| FR-002 | idempotent, only `mvr-*`, host unchanged | `test_overlay_lifecycle` (snapshot before/after, second `down`), `test_overlay_lab::test_up_is_idempotent`; whole-session snapshot guard in `conftest.py` (O2, O14) |
+| FR-003 | exactly one lab kind at a time | `test_overlay_lab::test_other_kinds_refused_*`, `test_overlay_lifecycle::test_single_node_labs_refuse_*`, phase 1 `test_kvm_up_refused_while_harness_is_up` |
+| FR-004 | kernel never forwards or answers on the nodes | `test_overlay_lab::test_topology_matches_contract` (`ip_forward=0`, `arp_ignore=8`, IPv6 off) |
+| FR-005 | named VRFs with ids | `test_vrf.c`, `test_cmd.c::vrf_*`, `test_cli_overlay::test_o9_*` |
+| FR-006 | each VM port in one VRF, default `default` | `test_port.c`, `test_config.c::phase1_config_parses_to_the_phase1_state`, `test_port.c::port_set_vrf_*` |
+| FR-007 | identical prefixes, hosts, neighbours in two VRFs | `test_route.c::same_routes_in_two_vrfs_*`, `test_neigh.c::same_ip_static_*`, `test_lpm.c::roots_are_isolated_*`, `test_forward.c::vrf_forward_*`, `test_isolation::test_o6_*` |
+| FR-008 | proxy ARP only from the ingress tenant | `test_forward.c::arp_is_answered_from_the_ingress_vrf_only`, `proxy_arp_answers_only_for_slash32_remote_routes_*`, `test_isolation::test_us3_4_*` |
+| FR-009 | ICMP errors from the ingress port's gateway | `test_forward.c::icmp_errors_are_sourced_from_the_ingress_vrfs_gateway`, `test_encap.c::size_rule_df_*` |
+| FR-009a | 64 VRFs, 16+1 ports, 10,000 routes, 1,024 neighbours in total | `test_vrf.c::sixty_fourth_*`, `test_port.c::sixteen_vm_ports_plus_the_underlay`, `test_lpm.c::ten_thousand_rules_*`, `test_route.c::ten_thousand_routes_in_total_*`, `test_neigh.c::capacity_1024_*`, `test_tunnel.c` (64 nodes / 64 VNIs / 1,024 labels) |
+| FR-010 | underlay port with its own neighbours, never a tenant table | `test_neigh.c::underlay_entries_are_invisible_*`, `underlay_fsm_*`, `test_decap.c::arp_on_the_underlay_*`, `icmp_echo_to_the_underlay_address_*` |
+| FR-011 | remote routes (node, encapsulation, tag), TTL once | `test_route.c::remote_route_*`, `test_encap.c::inner_ttl_*`, `test_forward.c::round_trip_*`, `test_tunnels::test_o3_*` (ttl=63) |
+| FR-012 | standard MPLSoUDP / VXLAN on the wire, stable source port | `test_pkt_udp.c`, `test_pkt_mpls.c`, `test_pkt_vxlan.c` (Linux-captured vector), `test_encap.c::*_is_byte_exact*`, `source_port_is_stable_*`, `test_tunnels::test_o3_*`/`test_o4_*` (scapy decode), `test_interop` |
+| FR-013 | decapsulate only what is addressed to us | `test_decap.c::outer_destination_other_than_our_underlay_ip_*`, corpus `not_for_us` |
+| FR-014 | VXLAN carries routed traffic with router MACs | `test_encap.c::vxlan_frame_is_byte_exact_with_router_macs_inside`, `test_decap.c::bad_inner_ethernet_in_vxlan`, `test_tunnels::test_o4_*`, `test_interop::test_o13_*` |
+| FR-015 | inner validation, local-only delivery, no transit, no TTL decrement | `test_decap.c::vxlan_never_transits_*`, `a_static_route_through_a_gateway_*`, `inner_ttl_1_and_0_*`, `a_malformed_inner_ipv4_*`, the US3 cases, `test_isolation::test_us3_3_*` |
+| FR-016 | never fragment; frag-needed with the remaining MTU | `test_encap.c::size_rule_*`, `a_packet_that_just_fits_*`, `test_underlay_corpus::test_o11_*` (SC-011) |
+| FR-017 | unexpected underlay traffic is counted | `test_decap.c::unexpected_underlay_traffic_*`, corpus `udp_port_9999`, `tcp_segment`, `ipv6_ethertype` |
+| FR-018 | every outer parser is bounds-checked | `test_pkt_udp/mpls/vxlan.c` (every truncation, exact-size buffers), `test_decap.c::every_truncation_of_*`, `flipping_any_header_byte_*` (ASan/UBSan) |
+| FR-019 | same-node traffic never tunnelled | `test_tunnels::test_o5_*`, `test_forward.c::vrf_forward_goes_to_the_ports_of_the_ingress_vrf_only` |
+| FR-020 | runtime changes within a second, no restart | `test_tunnels::test_o8_*`, `test_sc005_*`, `test_cli_overlay::test_cli_only_tenant_green_*`, `test_route.c::route_replace_is_atomic_*` |
+| FR-021 | CLI shows VRFs, remote routes, nodes, labels, VNIs, counters | `test_cmd.c::vrf_show_node_show_tunnel_show_shapes`, `vrf_and_tunnel_show_follow_live_changes`, `test_cli_overlay::test_o9_*`, `test_node_counters_*` |
+| FR-022 | every new drop has a named reason; `total == sum` | `test_stats.c::nine_new_reasons_*`, `all_reasons_have_stable_names`, `test_decap.c`, `test_underlay_corpus::test_every_corpus_case_*`, `docs/drop-reasons.md` |
+| FR-023 | a phase 1 config loads unchanged | `test_config.c::phase1_config_parses_to_the_phase1_state`, the phase 1 suites unchanged (SC-010) |
+| FR-024 | codec tests with vectors and malformed inputs | `test_pkt_udp.c`, `test_pkt_mpls.c`, `test_pkt_vxlan.c`, `test_decap.c` sweeps |
+| FR-025 | optional independent VXLAN endpoint | `lab/overlay/interop.sh`, `test_interop.py` (O13) |
+| FR-026 | one command runs phase 2 and phase 1 | `tests/e2e/run.sh` (`make e2e`, `make e2e-kvm`), O15 |
+
+| SC | Criterion (short) | Covered by |
+|---|---|---|
+| SC-001 | bring-up < 120 s KVM / < 15 s harness, teardown < 15 s, host unchanged | `test_overlay_lifecycle::test_lifecycle_*` (measured: harness 0.7 s, KVM 7 s, quickstart Results) |
+| SC-002 | 1,000 pings per same-tenant pair with each encapsulation, ttl 63 | `test_tunnels::test_sc002_*` (three pairs, MPLSoUDP then VXLAN for red, the reverse for blue) |
+| SC-003 | 30 s sweep of the shared address space, zero foreign frames | `test_isolation::test_sc003_*` (payload-tagged, captures on all 5 VM ports) |
+| SC-004 | 1 GB transfer across nodes with each encapsulation (KVM: 100 MB, as in phase 1.5) | `test_tunnels::test_o10_*` (`MINIVR_E2E_XFER_MB`: 1024 harness, 100 KVM) |
+| SC-005 | route add/delete and encapsulation change within 1 s, no restart | `test_tunnels::test_sc005_*`, `test_o8_*` (switch measured from pcap timestamps) |
+| SC-006 | malformed underlay corpus 100% attributed, forwarders stay up, valid traffic 0% loss | `test_underlay_corpus::test_every_corpus_case_*` (22 cases) |
+| SC-007 | every captured tunnel packet decodes; no tenant packet on the underlay | `capture.py` (scapy decode; tshark is not installed) used by `test_tunnels` (`assert_clean_underlay`) |
+| SC-008 | ping and 100 MB with the independent VXLAN endpoint | `test_interop.py` |
+| SC-009 | combined verification command under 8 minutes, 10 consecutive passes | `sudo make e2e` x10, `sudo make e2e-kvm` x3 (T060; results below) |
+| SC-010 | phase 1 suites pass unchanged | phase 1 suites inside `make e2e` / `make e2e-kvm`; the only edits to them are the two JSON-shape assertions that the phase 2 contract changes (`test_cli.py::test_json_shapes`, `test_v11_*`: 30 reasons, `vrf`/`role` fields) |
+| SC-011 | bulk transfers never stall on size; oversize behaves per FR-016 | `test_tunnels::test_o10_*`, `test_encap.c::size_rule_*`, `test_underlay_corpus::test_o11_*` |
+
+**SC-009 measurement (2026-11-22).** `sudo make e2e` ten times in a row: all passed, 347 to 361 s
+each (maximum 6 min 1 s). `sudo make e2e-kvm` three times: all passed, 329 to 334 s.
+
+**Transfer sizes (SC-004).** On namespace VMs the transfer is 1 GB (socat, SHA-256 on both ends);
+on KVM guests it is 100 MB (`dd | nc`), because the CirrOS tools make 1 GB impractically slow, as in
+phase 1.5.
+
+**Not covered by an automated check:** `tshark` decoding (the SC-007 decoder is scapy's MPLS and
+VXLAN layers, a standard third-party dissector; tshark is not installed on the development host).
