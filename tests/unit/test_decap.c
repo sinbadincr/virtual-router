@@ -361,3 +361,147 @@ TEST(egress_port_down_is_port_down) {
     CHECK_EQ_U64(g_stats.reasons[DROP_PORT_DOWN], 1);
     ov_teardown();
 }
+
+/* ---- US3: no tenant crosses over (extra ports give each tenant addresses the other lacks) ---- */
+
+static void cn2_with_private_vms(void) {
+    cn2();
+    uint8_t m1[6] = {2, 0, 0, 0x0a, 2, 0x10}, m2[6] = {2, 0, 0, 0x0a, 2, 0x11};
+    pio_fake_add_if("blue3", m1, 1500);
+    pio_fake_add_if("red4", m2, 1500);
+    struct cmd_err e;
+    CHECK(ov_cmd(CMD_CONFIG, "port add blue3 ifname blue3 ip 10.1.5.1/24 vrf blue", &e) == 0);
+    CHECK(ov_cmd(CMD_CONFIG, "neigh add 10.1.5.50 lladdr 02:00:00:02:02:50 dev blue3", &e) == 0); /* blue only */
+    CHECK(ov_cmd(CMD_CONFIG, "port add red4 ifname red4 ip 10.1.6.1/24 vrf red", &e) == 0);
+    CHECK(ov_cmd(CMD_CONFIG, "neigh add 10.1.6.60 lladdr 02:00:00:01:02:60 dev red4", &e) == 0);   /* red only */
+    CHECK(ov_cmd(CMD_CONFIG, "label add 1600 port red4", &e) == 0);
+}
+
+TEST(a_red_label_carrying_a_blue_only_destination_reaches_no_blue_port) {
+    cn2_with_private_vms();
+    { size_t k = mpls_frame(1012, IP4(10, 1, 5, 50), 63); ov_rx("u0", fr, k); } /* red2's label */
+    { size_t k = mpls_frame(1600, IP4(10, 1, 5, 50), 63); ov_rx("u0", fr, k); } /* red4's label */
+    CHECK_EQ_U64(g_stats.reasons[DROP_DECAP_NO_LOCAL_DEST], 2);
+    CHECK_EQ_U64(ov_tx_count("blue3") + ov_tx_count("blue2") + ov_tx_count("red2") + ov_tx_count("red4"), 0);
+    check_invariant();
+    ov_teardown();
+}
+
+TEST(a_blue_vni_carrying_a_red_only_destination_reaches_no_red_port) {
+    cn2_with_private_vms();
+    { size_t k = vxlan_frame(200, IP4(10, 1, 6, 60), 63); ov_rx("u0", fr, k); } /* blue VNI, red-only host */
+    { size_t k = vxlan_frame(200, IP4(10, 1, 2, 13), 63); ov_rx("u0", fr, k); } /* blue VNI, red3's address */
+    CHECK_EQ_U64(g_stats.reasons[DROP_DECAP_NO_LOCAL_DEST], 2);
+    CHECK_EQ_U64(ov_tx_count("red4") + ov_tx_count("red3") + ov_tx_count("red2"), 0);
+    /* the legitimate case still works: a red VNI to the red-only host */
+    { size_t k = vxlan_frame(300, IP4(10, 1, 6, 60), 63); ov_rx("u0", fr, k); }
+    CHECK_EQ_U64(ov_tx_count("red4"), 1);
+    check_invariant();
+    ov_teardown();
+}
+
+TEST(a_route_added_in_red_is_absent_from_blue) {
+    cn2_with_private_vms();
+    struct cmd_err e;
+    CHECK(ov_cmd(CMD_CLI, "route add 10.9.0.0/24 vrf red dev red4 via 10.1.6.60", &e) == 0);
+    CHECK(route_lookup(vrf_by_name("red")->id, IP4(10, 9, 0, 1)) != NULL);
+    CHECK(route_lookup(vrf_by_name("blue")->id, IP4(10, 9, 0, 1)) == NULL);
+    char buf[4096];
+    struct jw w;
+    jw_init(&w, buf, sizeof buf);
+    CHECK(cmd_exec("route show vrf blue", CMD_CLI, &w, &e) == 0);
+    CHECK(strstr(buf, "10.9.0.0/24") == NULL);
+    jw_init(&w, buf, sizeof buf);
+    CHECK(cmd_exec("route show vrf red", CMD_CLI, &w, &e) == 0);
+    CHECK(strstr(buf, "10.9.0.0/24") != NULL);
+    ov_teardown();
+}
+
+/* ---- US5: truncation and corruption sweeps (run under ASan in the gate) ---- */
+
+static size_t mpls_good(void) {
+    return mpls_frame(1012, IP4(10, 1, 1, 12), 63);
+}
+static size_t vxlan_good(void) {
+    return vxlan_frame(200, IP4(10, 1, 1, 12), 63);
+}
+
+static uint64_t vm_tx_total(void) {
+    return ov_tx_count("red2") + ov_tx_count("red3") + ov_tx_count("blue2");
+}
+
+/* Every prefix of a valid tunnel frame is dropped under a named reason, never delivered, and the
+ * bytes past the end of the frame (a stale copy of the full valid frame from the previous
+ * iteration is still in the pooled buffer) are never read: a read past the end would deliver. */
+static void truncation_sweep(size_t (*good)(void), const char *what) {
+    cn2();
+    size_t full = good();
+    uint8_t keep[2048];
+    memcpy(keep, fr, full);
+    { /* the full frame is delivered once, leaving its bytes in the pooled buffer */
+        ov_rx("u0", keep, full);
+        CHECK_EQ_U64(vm_tx_total(), 1);
+        ov_clear_tx();
+    }
+    for (size_t n = 1; n < full; n++) {
+        uint64_t drops = g_stats.drop_total;
+        ov_rx("u0", keep, n);
+        if (vm_tx_total() != 0 || g_stats.drop_total != drops + 1 || mbuf_in_use() != 0) {
+            TH_FAIL("%s truncated to %zu of %zu: tx=%llu drops +%llu", what, n, full,
+                    (unsigned long long)vm_tx_total(), (unsigned long long)(g_stats.drop_total - drops));
+            break;
+        }
+    }
+    CHECK_EQ_U64(stats_reason_sum(), g_stats.drop_total);
+    ov_teardown();
+}
+
+TEST(every_truncation_of_a_valid_mplsoudp_frame_is_dropped) {
+    truncation_sweep(mpls_good, "mplsoudp");
+}
+
+TEST(every_truncation_of_a_valid_vxlan_frame_is_dropped) {
+    truncation_sweep(vxlan_good, "vxlan");
+}
+
+/* Flip every byte of the headers (outer Ethernet, IPv4, UDP and the tunnel header and, for VXLAN,
+ * the inner Ethernet): the result is either exactly one drop, or a packet that is still valid
+ * (a field the receiver ignores) and delivered once; never a crash, a leak or both. */
+static void corruption_sweep(size_t (*good)(void), size_t hdr_bytes, const char *what) {
+    cn2();
+    uint8_t keep[2048];
+    size_t full = good();
+    memcpy(keep, fr, full);
+    unsigned delivered = 0, dropped = 0;
+    for (size_t i = 0; i < hdr_bytes; i++) {
+        uint8_t bad[2048];
+        memcpy(bad, keep, full);
+        bad[i] ^= 0xff;
+        uint64_t drops = g_stats.drop_total;
+        ov_clear_tx();
+        ov_rx("u0", bad, full);
+        uint64_t d = g_stats.drop_total - drops, tx = vm_tx_total();
+        if (!((d == 1 && tx == 0) || (d == 0 && tx == 1) || (d == 0 && ov_tx_count("u0") == 1))) {
+            TH_FAIL("%s byte %zu flipped: drops +%llu, vm tx %llu", what, i, (unsigned long long)d,
+                    (unsigned long long)tx);
+        }
+        delivered += (unsigned)tx;
+        dropped += (unsigned)d;
+        if (mbuf_in_use() != 0)
+            TH_FAIL("%s byte %zu: mbuf leak", what, i);
+    }
+    CHECK(dropped > 0 && delivered > 0); /* both outcomes occur: the sweep is not vacuous */
+    CHECK_EQ_U64(stats_reason_sum(), g_stats.drop_total);
+    ov_teardown();
+}
+
+TEST(flipping_any_header_byte_of_mplsoudp_never_crashes_or_leaks) {
+    corruption_sweep(mpls_good, ETH_HDR_LEN + IPV4_HDR_LEN + UDP_HDR_LEN + MPLS_LSE_LEN + IPV4_HDR_LEN,
+                     "mplsoudp");
+}
+
+TEST(flipping_any_header_byte_of_vxlan_never_crashes_or_leaks) {
+    corruption_sweep(vxlan_good,
+                     ETH_HDR_LEN + IPV4_HDR_LEN + UDP_HDR_LEN + VXLAN_HDR_LEN + ETH_HDR_LEN + IPV4_HDR_LEN,
+                     "vxlan");
+}
