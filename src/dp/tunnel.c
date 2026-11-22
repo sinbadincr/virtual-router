@@ -54,6 +54,7 @@ int node_add(const char *name, uint32_t ip, const uint8_t *rmac, struct cmd_err 
         memset(&nodes[i], 0, sizeof nodes[i]);
         nodes[i].id = (uint8_t)i;
         nodes[i].in_use = true;
+        nodes[i].owner = (uint8_t)g_owner_ctx;
         memcpy(nodes[i].name, name, n + 1);
         nodes[i].ip = ip;
         if (rmac) {
@@ -91,6 +92,7 @@ enum { SLOT_EMPTY, SLOT_USED, SLOT_TOMB };
 static struct {
     uint8_t state;
     uint8_t port;
+    uint8_t owner;
     uint32_t label;
 } lab[LABEL_SLOTS];
 static unsigned lab_used, lab_tombs;
@@ -114,11 +116,13 @@ static void lab_rehash(void) {
     static struct {
         uint32_t label;
         uint8_t port;
+        uint8_t owner;
     } tmp[LABEL_MAX_MAPPINGS];
     unsigned n = 0;
     for (unsigned i = 0; i < LABEL_SLOTS; i++)
         if (lab[i].state == SLOT_USED) {
             tmp[n].label = lab[i].label;
+            tmp[n].owner = lab[i].owner;
             tmp[n++].port = lab[i].port;
         }
     memset(lab, 0, sizeof lab);
@@ -130,6 +134,7 @@ static void lab_rehash(void) {
         lab[i].state = SLOT_USED;
         lab[i].label = tmp[k].label;
         lab[i].port = tmp[k].port;
+        lab[i].owner = tmp[k].owner;
     }
 }
 
@@ -142,6 +147,11 @@ static void lab_erase(int i) {
     lab[i].state = SLOT_TOMB;
     lab_used--;
     lab_tombs++;
+}
+
+int label_owner(uint32_t label) {
+    int i = lab_find(label);
+    return i < 0 ? -1 : lab[i].owner;
 }
 
 int label_add(uint32_t label, uint8_t port, struct cmd_err *err) {
@@ -166,6 +176,7 @@ int label_add(uint32_t label, uint8_t port, struct cmd_err *err) {
     lab[i].state = SLOT_USED;
     lab[i].label = label;
     lab[i].port = port;
+    lab[i].owner = (uint8_t)g_owner_ctx;
     lab_used++;
     return 0;
 }
@@ -226,12 +237,20 @@ static struct {
     bool used;
     uint32_t vni;
     uint8_t vrf;
+    uint8_t owner;
 } vnis[VNI_MAX_MAPPINGS];
 
 int vni_lookup(uint32_t vni) {
     for (unsigned i = 0; i < VNI_MAX_MAPPINGS; i++)
         if (vnis[i].used && vnis[i].vni == vni)
             return vnis[i].vrf;
+    return -1;
+}
+
+int vni_owner(uint32_t vni) {
+    for (unsigned i = 0; i < VNI_MAX_MAPPINGS; i++)
+        if (vnis[i].used && vnis[i].vni == vni)
+            return vnis[i].owner;
     return -1;
 }
 
@@ -247,6 +266,7 @@ int vni_add(uint32_t vni, unsigned vrf, struct cmd_err *err) {
             vnis[i].used = true;
             vnis[i].vni = vni;
             vnis[i].vrf = (uint8_t)vrf;
+            vnis[i].owner = (uint8_t)g_owner_ctx;
             return 0;
         }
     }

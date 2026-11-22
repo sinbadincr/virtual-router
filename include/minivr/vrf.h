@@ -5,6 +5,7 @@
 
 #include "cmd.h"
 #include "lpm.h"
+#include "owner.h"
 
 #define VRF_MAX 64
 #define VRF_DEFAULT 0
@@ -15,6 +16,7 @@
 struct vrf {
     uint8_t id;
     bool in_use;
+    uint8_t owner; /* enum owner */
     char name[VRF_NAME_MAX + 1];
     struct lpm_root root;
 };

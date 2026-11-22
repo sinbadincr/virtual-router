@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define FAKE_MAX_IFS 32
 #define FAKE_QLEN 256
@@ -15,6 +16,7 @@ struct fake_frame {
 
 struct fake_if {
     int exists, opened;
+    int adopted_fd1; /* fd passed to adopt(), plus one; closed with the handle */
     char name[16];
     uint8_t mac[6];
     int mtu;
@@ -53,7 +55,19 @@ static void *f_open(const char *ifname) {
 }
 
 static void f_close(void *h) {
-    ((struct fake_if *)h)->opened = 0;
+    struct fake_if *f = h;
+    f->opened = 0;
+    if (f->adopted_fd1) {
+        close(f->adopted_fd1 - 1);
+        f->adopted_fd1 = 0;
+    }
+}
+
+static void *f_adopt(int fd, const char *ifname) {
+    struct fake_if *f = f_open(ifname);
+    if (f)
+        f->adopted_fd1 = fd + 1;
+    return f;
 }
 
 static int f_rx(void *h, struct mbuf **m, int max) {
@@ -103,7 +117,7 @@ static int f_mtu(void *h) {
     return ((struct fake_if *)h)->mtu;
 }
 
-const struct pio_ops pio_fake_ops = {"fake", f_open, f_close, f_rx, f_tx, f_fd, f_mac, f_mtu};
+const struct pio_ops pio_fake_ops = {"fake", f_open, f_close, f_rx, f_tx, f_fd, f_mac, f_mtu, f_adopt};
 
 static int inject(void *h, const void *frame, size_t len, int vlan) {
     struct fake_if *f = h;

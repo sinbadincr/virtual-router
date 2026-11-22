@@ -77,6 +77,7 @@ static struct neigh *insert(uint8_t table, uint32_t ip) {
     tab[i].slot = SLOT_USED;
     tab[i].table = table;
     tab[i].ip = ip;
+    tab[i].owner = (uint8_t)g_owner_ctx;
     used++;
     return &tab[i];
 }
@@ -196,6 +197,7 @@ enum neigh_res neigh_resolve(uint32_t ip, uint8_t port, struct mbuf *m, uint8_t 
             return NEIGH_DROP;
         }
         n = insert(table, ip);
+        n->owner = OWNER_CONFIG;
         n->port = port;
         n->kind = NEIGH_LEARNED;
         n->state = NEIGH_INCOMPLETE;
@@ -232,6 +234,7 @@ void neigh_learn(uint32_t ip, const uint8_t mac[6], uint8_t port) {
             return;
         }
         n = insert(table, ip);
+        n->owner = OWNER_CONFIG;
         n->kind = NEIGH_LEARNED;
     }
     memcpy(n->mac, mac, 6);
@@ -274,6 +277,19 @@ void neigh_port_down(uint8_t port) {
     }
 }
 
+void neigh_port_removed(uint8_t port) {
+    for (unsigned i = 0; i < NEIGH_SLOTS; i++) {
+        struct neigh *n = &tab[i];
+        if (n->slot != SLOT_USED || n->port != port)
+            continue;
+        release_hold(n, NULL, DROP_PORT_DELETED, false);
+        if (n->kind == NEIGH_STATIC)
+            route_del_host(n->table, n->ip);
+        erase(n);
+    }
+    binding[port].bound = false;
+}
+
 void neigh_gateway_removed(unsigned table, uint32_t gw) {
     struct neigh *n = table > 255 ? NULL : find((uint8_t)table, gw);
     if (n && n->kind == NEIGH_LEARNED && n->state != NEIGH_REACHABLE) {
@@ -303,8 +319,10 @@ void neigh_port_set_vrf(uint8_t port, uint8_t new_vrf) {
             old = &tab[i];
     if (!old)
         return;
+    uint8_t old_owner = old->owner;
     erase(old);
     struct neigh *n = insert(new_vrf, ip);
+    n->owner = old_owner;
     memcpy(n->mac, mac, 6);
     n->port = port;
     n->kind = NEIGH_STATIC;

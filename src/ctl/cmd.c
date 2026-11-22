@@ -4,10 +4,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "minivr/clock.h"
 #include "minivr/mbuf.h"
 #include "minivr/neigh.h"
+#include "minivr/owner.h"
 #include "minivr/port.h"
 #include "minivr/ratelimit.h"
 #include "minivr/route.h"
@@ -166,7 +168,29 @@ const char *cmd_parse_uint(const char *s, uint64_t min, uint64_t max, uint64_t *
 struct cmd_ctx {
     struct jw *out;
     struct cmd_err *err;
+    struct cmd_session *sess; /* NULL for the config file and the plain cmd_exec() path */
+    enum owner who;
+    enum cmd_where where;
 };
+
+static cmd_fd_checker fd_checker;
+static char boot_id[17];
+
+void cmd_set_fd_checker(cmd_fd_checker fn) {
+    fd_checker = fn;
+}
+
+void cmd_set_boot_id(const char *hex16) {
+    snprintf(boot_id, sizeof boot_id, "%s", hex16);
+}
+
+/* `del`/`replace`/`set` from the agent session only touch agent-owned entries. */
+static int check_owner(struct cmd_ctx *c, int entry_owner) {
+    if (c->who == OWNER_AGENT && entry_owner >= 0 && entry_owner != OWNER_AGENT)
+        return cmd_fail(c->err, "not-owner", "entry is owned by %s, not the agent",
+                        owner_name((enum owner)entry_owner));
+    return 0;
+}
 
 typedef int (*cmd_fn)(struct cmd_ctx *c, int argc, char **argv);
 
@@ -196,6 +220,9 @@ static int cmd_vrf_add(struct cmd_ctx *c, int argc, char **argv) {
 static int cmd_vrf_del(struct cmd_ctx *c, int argc, char **argv) {
     if (argc != 3)
         return usage(c, "vrf del <name>");
+    const struct vrf *old = vrf_by_name(argv[2]);
+    if (old && check_owner(c, old->owner) != 0)
+        return -1;
     return vrf_del(argv[2], c->err);
 }
 
@@ -204,7 +231,15 @@ static int add_port(struct cmd_ctx *c, int argc, char **argv, enum port_role rol
     static const char *u_port = "port add <name> ifname <if> ip <a.b.c.d/len> [vrf <vrf>]";
     static const char *u_ul = "underlay add <name> ifname <if> ip <a.b.c.d/len>";
     const char *u = role == PORT_VM ? u_port : u_ul;
-    int base = role == PORT_VM ? 7 : 7;
+    int base = 7;
+    bool has_fd = role == PORT_VM && argc > 2 && strcmp(argv[argc - 1], "fd") == 0;
+    if (has_fd)
+        argc--;
+    if (c->where == CMD_CLI && !has_fd)
+        return cmd_fail(c->err, "config-only", "'%s' is only valid in the config file",
+                        role == PORT_VM ? "port add" : "underlay add");
+    if (c->where == CMD_CONFIG && has_fd)
+        return cmd_fail(c->err, "bad-syntax", "'fd' is only valid on the agent session");
     if ((argc != base && !(role == PORT_VM && argc == 9)) || strcmp(argv[3], "ifname") != 0 ||
         strcmp(argv[5], "ip") != 0 || (argc == 9 && strcmp(argv[7], "vrf") != 0))
         return usage(c, u);
@@ -216,7 +251,40 @@ static int add_port(struct cmd_ctx *c, int argc, char **argv, enum port_role rol
     unsigned vrf = VRF_DEFAULT;
     if (argc == 9 && resolve_vrf(c, argv[8], &vrf) != 0)
         return -1;
-    return port_add(argv[2], argv[4], ip, len, role, vrf, c->err) ? 0 : -1;
+    if (!has_fd)
+        return port_add(argv[2], argv[4], ip, len, role, vrf, c->err) ? 0 : -1;
+    /* runtime port: the socket arrived with the request (SCM_RIGHTS) */
+    if (!c->sess || c->sess->role != CMD_ROLE_AGENT)
+        return cmd_fail(c->err, "not-permitted", "'port add ... fd' needs the agent session");
+    int fd = c->sess->fd_in;
+    if (fd < 0)
+        return cmd_fail(c->err, "bad-syntax", "'port add ... fd' needs a socket passed with the request");
+    c->sess->fd_in = -1; /* consumed: closed here on any error, owned by the backend on success */
+    if (fd_checker) {
+        const char *bad = fd_checker(fd, argv[4]);
+        if (bad) {
+            close(fd);
+            return cmd_fail(c->err, "bad-fd", "%s", bad);
+        }
+    }
+    struct port *p = port_add_adopted(argv[2], argv[4], &fd, ip, len, vrf, c->err);
+    if (!p) {
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+    return 0;
+}
+
+static int cmd_port_del(struct cmd_ctx *c, int argc, char **argv) {
+    if (argc != 3)
+        return usage(c, "port del <name>");
+    struct port *p = port_find(argv[2]);
+    if (!p)
+        return cmd_fail(c->err, "unknown-port", "no such port '%s'", argv[2]);
+    if (check_owner(c, p->owner) != 0)
+        return -1;
+    return port_del(p, c->err);
 }
 
 static int cmd_port_add(struct cmd_ctx *c, int argc, char **argv) {
@@ -281,6 +349,11 @@ static int route_add_or_replace(struct cmd_ctx *c, int argc, char **argv, int re
         } else {
             return usage(c, u);
         }
+    }
+    if (replace) {
+        const struct route *old = route_find(vrf, prefix, len);
+        if (old && check_owner(c, old->owner) != 0)
+            return -1;
     }
     if (dev) { /* local */
         if (node || encap || label || vni)
@@ -373,6 +446,7 @@ static void json_route(struct jw *w, const char *key, const struct route *r) {
         jw_str(w, "node", n ? n->name : "?");
         jw_str(w, "encap", stats_encap_name(r->encap));
         jw_u64(w, "tag", r->tag);
+        jw_str(w, "owner", owner_name((enum owner)r->owner));
         jw_obj_end(w);
         return;
     }
@@ -388,10 +462,11 @@ static void json_route(struct jw *w, const char *key, const struct route *r) {
         jw_null(w, "gateway");
     }
     jw_str(w, "origin", route_origin_name(r->origin));
+    jw_str(w, "owner", owner_name((enum owner)r->owner));
     jw_obj_end(w);
 }
 
-#define SHOW_DEFAULT_LIMIT 500 /* ~45 KB of JSON: always fits one 64 KiB response */
+#define SHOW_DEFAULT_LIMIT 400 /* ~50 KB of JSON: always fits one 64 KiB response */
 
 struct page {
     struct jw *w;
@@ -483,6 +558,9 @@ static int cmd_route_del(struct cmd_ctx *c, int argc, char **argv) {
     unsigned vrf;
     if (opt_vrf(c, argc, argv, 3, &vrf) != argc)
         return argc == 5 && !vrf_by_name(argv[4]) ? -1 : usage(c, u);
+    const struct route *old = route_find(vrf, prefix, len);
+    if (old && check_owner(c, old->owner) != 0)
+        return -1;
     return route_del(vrf, prefix, len, c->err);
 }
 
@@ -537,6 +615,7 @@ static int cmd_port_show(struct cmd_ctx *c, int argc, char **argv) {
         jw_u64(c->out, "tx_pkts", s->tx_pkts);
         jw_u64(c->out, "tx_bytes", s->tx_bytes);
         jw_u64(c->out, "drops", s->drops);
+        jw_str(c->out, "owner", owner_name((enum owner)p->owner));
         jw_obj_end(c->out);
     }
     jw_arr_end(c->out);
@@ -550,6 +629,8 @@ static int cmd_port_set(struct cmd_ctx *c, int argc, char **argv) {
     struct port *p = port_find(argv[2]);
     if (!p)
         return cmd_fail(c->err, "unknown-port", "no such port '%s'", argv[2]);
+    if (check_owner(c, p->owner) != 0)
+        return -1;
     if (strcmp(argv[3], "vrf") == 0) {
         unsigned vrf;
         if (resolve_vrf(c, argv[4], &vrf) != 0)
@@ -643,6 +724,7 @@ static int cmd_neigh_show(struct cmd_ctx *c, int argc, char **argv) {
                                 : n->state == NEIGH_INCOMPLETE ? "INCOMPLETE"
                                                                : "FAILED");
         jw_u64(c->out, "held", n->nhold);
+        jw_str(c->out, "owner", owner_name((enum owner)n->owner));
         jw_obj_end(c->out);
     }
     jw_arr_end(c->out);
@@ -661,6 +743,9 @@ static int cmd_neigh_del(struct cmd_ctx *c, int argc, char **argv) {
     unsigned vrf;
     if (opt_vrf(c, argc, argv, 3, &vrf) != argc)
         return argc == 5 && !vrf_by_name(argv[4]) ? -1 : usage(c, u);
+    const struct neigh *old = neigh_lookup(vrf, ip);
+    if (old && check_owner(c, old->owner) != 0)
+        return -1;
     return neigh_del(vrf, ip, c->err);
 }
 
@@ -697,6 +782,7 @@ static int cmd_vrf_show(struct cmd_ctx *c, int argc, char **argv) {
         jw_u64(c->out, "neighbours", cnt[1]);
         jw_u64(c->out, "labels", label_count_vrf(v->id));
         jw_u64(c->out, "vnis", tunnel_vni_count_vrf(v->id));
+        jw_str(c->out, "owner", owner_name((enum owner)v->owner));
         jw_obj_end(c->out);
     }
     jw_arr_end(c->out);
@@ -725,12 +811,18 @@ static int cmd_node_set(struct cmd_ctx *c, int argc, char **argv) {
     const char *e = cmd_parse_mac(argv[4], mac);
     if (e)
         return cmd_fail(c->err, e, "invalid MAC '%s'", argv[4]);
+    const struct node *old = node_find(argv[2]);
+    if (old && check_owner(c, old->owner) != 0)
+        return -1;
     return node_set_rmac(argv[2], mac, c->err);
 }
 
 static int cmd_node_del(struct cmd_ctx *c, int argc, char **argv) {
     if (argc != 3)
         return usage(c, "node del <name>");
+    const struct node *old = node_find(argv[2]);
+    if (old && check_owner(c, old->owner) != 0)
+        return -1;
     return node_del(argv[2], c->err);
 }
 
@@ -782,6 +874,7 @@ static int cmd_node_show(struct cmd_ctx *c, int argc, char **argv) {
                                 : nb->state == NEIGH_INCOMPLETE ? "resolving"
                                                                  : "failed");
         json_node_counters(c->out, n->id);
+        jw_str(c->out, "owner", owner_name((enum owner)n->owner));
         jw_obj_end(c->out);
     }
     jw_arr_end(c->out);
@@ -808,6 +901,8 @@ static int cmd_label_del(struct cmd_ctx *c, int argc, char **argv) {
     const char *e = cmd_parse_uint(argv[2], 0, 0xffffffffu, &label);
     if (e)
         return cmd_fail(c->err, e, "label must be a number");
+    if (check_owner(c, label_owner((uint32_t)label)) != 0)
+        return -1;
     return label_del((uint32_t)label, c->err);
 }
 
@@ -831,6 +926,8 @@ static int cmd_vni_del(struct cmd_ctx *c, int argc, char **argv) {
     const char *e = cmd_parse_uint(argv[2], 0, 0xffffffffu, &vni);
     if (e)
         return cmd_fail(c->err, e, "VNI must be a number");
+    if (check_owner(c, vni_owner((uint32_t)vni)) != 0)
+        return -1;
     return vni_del((uint32_t)vni, c->err);
 }
 
@@ -842,6 +939,7 @@ static void tunnel_label_cb(uint32_t label, uint8_t port, void *arg) {
     jw_u64(w, "label", label);
     jw_str(w, "port", p ? p->name : "?");
     jw_str(w, "vrf", v ? v->name : "?");
+    jw_str(w, "owner", owner_name((enum owner)label_owner(label)));
     jw_obj_end(w);
 }
 
@@ -851,6 +949,7 @@ static void tunnel_vni_cb(uint32_t vni, unsigned vrf, void *arg) {
     jw_obj_begin(w, NULL);
     jw_u64(w, "vni", vni);
     jw_str(w, "vrf", v ? v->name : "?");
+    jw_str(w, "owner", owner_name((enum owner)vni_owner(vni)));
     jw_obj_end(w);
 }
 
@@ -950,6 +1049,8 @@ static int cmd_version(struct cmd_ctx *c, int argc, char **argv) {
     (void)argv;
     if (argc != 1)
         return usage(c, "version");
+    jw_str(c->out, "daemon", "minivrd");
+    jw_str(c->out, "boot_id", boot_id[0] ? boot_id : "0000000000000000");
     jw_u64(c->out, "protocol", PROTOCOL_VERSION);
     jw_str(c->out, "version", MINIVR_VERSION);
 #ifdef MINIVR_DEBUG
@@ -958,6 +1059,75 @@ static int cmd_version(struct cmd_ctx *c, int argc, char **argv) {
     jw_str(c->out, "build", "release");
 #endif
     jw_u64(c->out, "uptime_s", (clock_now_ns() - start_ns) / NS_PER_SEC);
+    return 0;
+}
+
+/* ---- sessions ---- */
+
+static struct cmd_session *registry[CMD_MAX_SESSIONS];
+static unsigned next_session_id = 1;
+
+void cmd_session_open(struct cmd_session *s, int peer_pid, unsigned peer_uid) {
+    memset(s, 0, sizeof *s);
+    s->in_use = 1;
+    s->id = next_session_id++;
+    s->role = CMD_ROLE_CLI;
+    s->peer_pid = peer_pid;
+    s->peer_uid = peer_uid;
+    s->since_ns = clock_now_ns();
+    s->fd_in = -1;
+    for (unsigned i = 0; i < CMD_MAX_SESSIONS; i++)
+        if (!registry[i]) {
+            registry[i] = s;
+            return;
+        }
+}
+
+void cmd_session_close(struct cmd_session *s) {
+    if (s->fd_in >= 0)
+        close(s->fd_in);
+    s->fd_in = -1;
+    s->in_use = 0;
+    for (unsigned i = 0; i < CMD_MAX_SESSIONS; i++)
+        if (registry[i] == s)
+            registry[i] = NULL;
+}
+
+static int cmd_session_agent(struct cmd_ctx *c, int argc, char **argv) {
+    (void)argv;
+    if (argc != 2)
+        return usage(c, "session agent");
+    if (!c->sess)
+        return cmd_fail(c->err, "config-only", "no session");
+    if (c->sess->role == CMD_ROLE_AGENT)
+        return 0;
+    for (unsigned i = 0; i < CMD_MAX_SESSIONS; i++)
+        if (registry[i] && registry[i]->role == CMD_ROLE_AGENT)
+            return cmd_fail(c->err, "busy", "another agent session is open (id %u)", registry[i]->id);
+    c->sess->role = CMD_ROLE_AGENT;
+    c->who = OWNER_AGENT;
+    return 0;
+}
+
+static int cmd_session_show(struct cmd_ctx *c, int argc, char **argv) {
+    (void)argv;
+    if (argc != 2)
+        return usage(c, "session show");
+    jw_arr_begin(c->out, "sessions");
+    for (unsigned i = 0; i < CMD_MAX_SESSIONS; i++) {
+        const struct cmd_session *s = registry[i];
+        if (!s)
+            continue;
+        jw_obj_begin(c->out, NULL);
+        jw_u64(c->out, "id", s->id);
+        jw_str(c->out, "role", s->role == CMD_ROLE_AGENT ? "agent" : "cli");
+        jw_u64(c->out, "peer_pid", (uint64_t)s->peer_pid);
+        jw_u64(c->out, "peer_uid", s->peer_uid);
+        jw_u64(c->out, "since", (clock_now_ns() - s->since_ns) / NS_PER_SEC);
+        jw_u64(c->out, "requests", s->requests);
+        jw_obj_end(c->out);
+    }
+    jw_arr_end(c->out);
     return 0;
 }
 
@@ -974,7 +1144,10 @@ static const struct cmd_def cmds[] = {
     {"vrf add", cmd_vrf_add, CMD_BOTH, 0},
     {"vrf del", cmd_vrf_del, CMD_CLI, 0},
     {"vrf show", cmd_vrf_show, CMD_CLI, 0},
-    {"port add", cmd_port_add, CMD_CONFIG, 0},
+    {"port add", cmd_port_add, CMD_BOTH, 0},
+    {"port del", cmd_port_del, CMD_CLI, 0},
+    {"session agent", cmd_session_agent, CMD_CLI, 0},
+    {"session show", cmd_session_show, CMD_CLI, 0},
     {"underlay add", cmd_underlay_add, CMD_CONFIG, 0},
     {"node add", cmd_node_add, CMD_BOTH, 0},
     {"node set", cmd_node_set, CMD_CLI, 0},
@@ -1038,10 +1211,24 @@ static void write_error(struct jw *out, const struct cmd_err *err) {
     jw_obj_end(out);
 }
 
+static int exec_ctx(struct cmd_session *s, const char *line, enum cmd_where where, struct jw *out,
+                    struct cmd_err *err);
+
 int cmd_exec(const char *line, enum cmd_where where, struct jw *out, struct cmd_err *err) {
+    return exec_ctx(NULL, line, where, out, err);
+}
+
+int cmd_exec_session(struct cmd_session *s, const char *line, struct jw *out, struct cmd_err *err) {
+    s->requests++;
+    return exec_ctx(s, line, CMD_CLI, out, err);
+}
+
+static int exec_ctx(struct cmd_session *s, const char *line, enum cmd_where where, struct jw *out,
+                    struct cmd_err *err) {
     char buf[1024];
     char *argv[CMD_MAX_ARGS];
-    struct cmd_ctx ctx = {out, err};
+    struct cmd_ctx ctx = {.out = out, .err = err, .sess = s, .where = where};
+    ctx.who = where == CMD_CONFIG ? OWNER_CONFIG : OWNER_CLI;
     err->code = NULL;
     err->message[0] = 0;
 
@@ -1076,7 +1263,12 @@ int cmd_exec(const char *line, enum cmd_where where, struct jw *out, struct cmd_
     jw_obj_begin(out, NULL);
     jw_bool(out, "ok", true);
     jw_obj_begin(out, "data");
-    if (d->fn(&ctx, argc, argv) != 0)
+    if (s && s->role == CMD_ROLE_AGENT)
+        ctx.who = OWNER_AGENT;
+    g_owner_ctx = ctx.who;
+    int rc = d->fn(&ctx, argc, argv);
+    g_owner_ctx = OWNER_CONFIG;
+    if (rc != 0)
         goto fail;
     jw_obj_end(out);
     jw_obj_end(out);

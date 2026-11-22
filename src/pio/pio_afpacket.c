@@ -21,29 +21,24 @@ struct afp {
     uint8_t mac[6];
 };
 
-static void *afp_open(const char *ifname) {
+/* Open, bind and configure an AF_PACKET socket for `ifname`; returns the fd or -1 (errno set).
+ * Needs CAP_NET_RAW: the agent calls this and passes the fd to the unprivileged forwarder. */
+int afp_socket_open(const char *ifname) {
     int fd = socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, htons(ETH_P_ALL));
     if (fd < 0)
-        return NULL;
+        return -1;
     struct ifreq ifr;
     memset(&ifr, 0, sizeof ifr);
     strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
-    struct afp *a = calloc(1, sizeof *a);
-    if (!a || ioctl(fd, SIOCGIFINDEX, &ifr) < 0)
+    if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0)
         goto err;
-    a->ifindex = ifr.ifr_ifindex;
-    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0)
-        goto err;
-    memcpy(a->mac, ifr.ifr_hwaddr.sa_data, 6);
-    if (ioctl(fd, SIOCGIFMTU, &ifr) < 0)
-        goto err;
-    a->mtu = ifr.ifr_mtu;
+    int ifindex = ifr.ifr_ifindex;
 
     struct sockaddr_ll sll;
     memset(&sll, 0, sizeof sll);
     sll.sll_family = AF_PACKET;
     sll.sll_protocol = htons(ETH_P_ALL);
-    sll.sll_ifindex = a->ifindex;
+    sll.sll_ifindex = ifindex;
     if (bind(fd, (struct sockaddr *)&sll, sizeof sll) < 0)
         goto err;
 
@@ -58,19 +53,57 @@ static void *afp_open(const char *ifname) {
         goto err;
     struct packet_mreq mr;
     memset(&mr, 0, sizeof mr);
-    mr.mr_ifindex = a->ifindex;
+    mr.mr_ifindex = ifindex;
     mr.mr_type = PACKET_MR_PROMISC;
     if (setsockopt(fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mr, sizeof mr) < 0)
         goto err;
+    return fd;
+err : {
+    int e = errno;
+    close(fd);
+    errno = e;
+    return -1;
+}
+}
+
+/* Wrap an already open and bound socket (ownership of fd passes to the handle on success). */
+static void *afp_adopt(int fd, const char *ifname) {
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof ifr);
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    struct afp *a = calloc(1, sizeof *a);
+    if (!a)
+        return NULL;
+    if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0)
+        goto err;
+    a->ifindex = ifr.ifr_ifindex;
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0)
+        goto err;
+    memcpy(a->mac, ifr.ifr_hwaddr.sa_data, 6);
+    if (ioctl(fd, SIOCGIFMTU, &ifr) < 0)
+        goto err;
+    a->mtu = ifr.ifr_mtu;
     a->fd = fd;
     return a;
 err : {
     int e = errno;
-    close(fd);
     free(a);
     errno = e;
     return NULL;
 }
+}
+
+static void *afp_open(const char *ifname) {
+    int fd = afp_socket_open(ifname);
+    if (fd < 0)
+        return NULL;
+    void *h = afp_adopt(fd, ifname);
+    if (!h) {
+        int e = errno;
+        close(fd);
+        errno = e;
+    }
+    return h;
 }
 
 static void afp_close(void *h) {
@@ -193,4 +226,4 @@ static int afp_mtu(void *h) {
 }
 
 const struct pio_ops pio_afpacket_ops = {"af_packet", afp_open, afp_close, afp_rx,
-                                         afp_tx,      afp_fd,   afp_mac,   afp_mtu};
+                                         afp_tx,      afp_fd,   afp_mac,   afp_mtu, afp_adopt};

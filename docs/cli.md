@@ -39,7 +39,7 @@ Address syntax: IPv4 dotted quad; prefix `a.b.c.d/len` (host bits must be zero);
 | `port show` | CLI | name, ifname, role, vrf, mac, ip/len, mtu, admin, oper, rx/tx packets and bytes, drops |
 | `port set <name> admin up\|down` | CLI | change admin state; going down releases held packets |
 | `port set <name> vrf <vrf>` | CLI | move a VM port to another VRF (see "VRFs") |
-| `route show [vrf <vrf>] [offset <n>] [limit <n>]` | CLI | vrf, prefix, port, gateway, origin (+ node/encap/tag for remote routes), in prefix order; paged (default 500 per page) |
+| `route show [vrf <vrf>] [offset <n>] [limit <n>]` | CLI | vrf, prefix, port, gateway, origin (+ node/encap/tag for remote routes), in prefix order; paged (default 400 per page) |
 | `route add <prefix> [vrf <vrf>] dev <port> [via <gw>]` | config, CLI | add a static route in the VRF (default `default`); `dev` must be in that VRF; `gw` must be inside the egress port's subnet |
 | `route del <prefix> [vrf <vrf>]` | CLI | delete a static or remote route; `connected` and `host` routes are `immutable` |
 | `route lookup <ip> [vrf <vrf>]` | CLI | the route the longest-prefix match selects in that VRF |
@@ -84,7 +84,7 @@ without `rmac`). The MPLS label of a remote route is the label the *receiving* n
 A failed command never changes forwarder state.
 
 **Paging.** A response is limited to 65,536 bytes, so `route show` and `neigh show` return at
-most `limit` entries (default 500, at least 1) starting at `offset`, plus `total`, `offset` and
+most `limit` entries (default 400, at least 1) starting at `offset`, plus `total`, `offset` and
 `next_offset` (`null` on the last page). In table mode `vrctl` follows `next_offset` itself and
 prints everything; with `-j` you get one page and ask for the next with `offset <next_offset>`.
 Any other response that would still exceed the limit is rejected with `bad-syntax` and the message

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/random.h>
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
@@ -19,6 +20,7 @@
 #include "minivr/cmd.h"
 #include "minivr/config.h"
 #include "minivr/ctl_server.h"
+#include "minivr/fdcheck.h"
 #include "minivr/forward.h"
 #include "minivr/log.h"
 #include "minivr/mbuf.h"
@@ -76,6 +78,35 @@ static void on_port(struct evsrc *s, uint32_t ev) {
     }
 }
 
+/* Runtime ports (agent session): watch the new fd, stop watching before the port closes. */
+static void port_added(struct port *p) {
+    struct evsrc *s = &port_src[p->id];
+    s->fd = port_backend()->fd(p->pio);
+    s->cb = on_port;
+    s->arg = p;
+    if (ev_add(s, EPOLLIN) < 0) {
+        log_error("ctl", "cannot watch runtime port", "port=%s errno=%d", p->name, errno);
+        return;
+    }
+    log_info("ctl", "runtime port added", "port=%s ifname=%s", p->name, p->ifname);
+}
+
+static void port_removed(struct port *p) {
+    ev_del(&port_src[p->id]);
+    port_src[p->id].fd = -1;
+    log_info("ctl", "runtime port deleted", "port=%s", p->name);
+}
+
+static void make_boot_id(void) {
+    uint8_t r[8];
+    char hex[17];
+    if (getrandom(r, sizeof r, 0) != (ssize_t)sizeof r)
+        memset(r, 0, sizeof r);
+    for (int i = 0; i < 8; i++)
+        snprintf(hex + 2 * i, 3, "%02x", r[i]);
+    cmd_set_boot_id(hex);
+}
+
 int main(int argc, char **argv) {
     const char *config = NULL, *sock = "/run/minivr/minivr.sock", *user = "nobody";
     static const struct option opts[] = {{"config", required_argument, 0, 'c'},
@@ -102,6 +133,8 @@ int main(int argc, char **argv) {
 
     uid_t launch_uid = getuid(); /* recorded before the privilege drop (FR-022) */
     cmd_init();
+    make_boot_id();
+    cmd_set_fd_checker(fd_check_afpacket);
     if (mbuf_pool_init(MBUF_POOL_SIZE) != 0 || ev_init() != 0) {
         log_error("main", "initialisation failed", "errno=%d", errno);
         return 1;
@@ -147,6 +180,8 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
+
+    port_set_hooks(port_added, port_removed); /* only runtime ports reach them from here on */
 
     /* 3. rtnetlink, then the control socket */
     crash_install();

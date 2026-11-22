@@ -20,7 +20,7 @@ set(DP_SRC ${DP_SRC} src/ctl/cmd.c src/ctl/frame.c)
 add_library(minivr_dp STATIC ${DP_SRC})
 
 file(GLOB DAEMON_SRC CONFIGURE_DEPENDS src/daemon/*.c src/pio/pio_afpacket.c
-     src/ctl/config.c src/ctl/ctl_server.c)
+     src/ctl/config.c src/ctl/ctl_server.c src/ctl/fdcheck.c)
 add_executable(minivrd ${DAEMON_SRC})
 target_link_libraries(minivrd minivr_dp)
 target_link_options(minivrd PRIVATE -rdynamic) # symbol names in crash backtraces

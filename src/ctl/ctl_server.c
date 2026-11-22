@@ -1,6 +1,7 @@
 #include "minivr/ctl_server.h"
 
 #include <errno.h>
+#include <sys/uio.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -24,6 +25,8 @@ struct client {
     struct frame_rx rx;
     uint8_t tx[FRAME_HDR + FRAME_MAX];
     size_t tx_len, tx_off;
+    struct cmd_session sess;
+    int fd_error; /* an fd arrived that the session may not send */
 };
 
 static struct evsrc listener = {.fd = -1};
@@ -36,6 +39,7 @@ static void client_close(struct client *c) {
         return;
     ev_del(&c->src);
     close(c->src.fd);
+    cmd_session_close(&c->sess);
     c->in_use = 0;
 }
 
@@ -68,7 +72,17 @@ static void handle_request(struct client *c, const uint8_t *p, size_t len) {
     struct jw w;
     struct cmd_err err;
     jw_init(&w, resp, sizeof resp);
-    if (len >= sizeof line) {
+    if (c->fd_error) {
+        c->fd_error = 0;
+        cmd_fail(&err, "not-permitted", "file descriptors are only accepted on the agent session");
+        jw_obj_begin(&w, NULL);
+        jw_bool(&w, "ok", false);
+        jw_obj_begin(&w, "error");
+        jw_str(&w, "code", err.code);
+        jw_str(&w, "message", err.message);
+        jw_obj_end(&w);
+        jw_obj_end(&w);
+    } else if (len >= sizeof line) {
         cmd_fail(&err, "bad-syntax", "command too long");
         jw_obj_begin(&w, NULL);
         jw_bool(&w, "ok", false);
@@ -80,7 +94,7 @@ static void handle_request(struct client *c, const uint8_t *p, size_t len) {
     } else {
         memcpy(line, p, len);
         line[len] = 0;
-        cmd_exec(line, CMD_CLI, &w, &err);
+        cmd_exec_session(&c->sess, line, &w, &err);
         if (jw_finish(&w) != 0) {
             jw_reset(&w);
             jw_obj_begin(&w, NULL);
@@ -91,6 +105,10 @@ static void handle_request(struct client *c, const uint8_t *p, size_t len) {
             jw_obj_end(&w);
             jw_obj_end(&w);
         }
+    }
+    if (c->sess.fd_in >= 0) { /* the command did not take the passed fd */
+        close(c->sess.fd_in);
+        c->sess.fd_in = -1;
     }
     queue_response(c, resp, w.len);
 }
@@ -109,7 +127,35 @@ static void client_cb(struct evsrc *s, uint32_t events) {
     if (!(events & EPOLLIN) || c->tx_len)
         return;
     uint8_t buf[4096];
-    ssize_t n = recv(c->src.fd, buf, sizeof buf, MSG_DONTWAIT);
+    union {
+        struct cmsghdr align;
+        uint8_t b[CMSG_SPACE(4 * sizeof(int))];
+    } ctl;
+    struct iovec iov = {buf, sizeof buf};
+    struct msghdr mh = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = ctl.b,
+                        .msg_controllen = sizeof ctl.b};
+    ssize_t n = recvmsg(c->src.fd, &mh, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+    if (n >= 0) {
+        int nfds = 0;
+        for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); cm; cm = CMSG_NXTHDR(&mh, cm)) {
+            if (cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS)
+                continue;
+            size_t cnt = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+            for (size_t k = 0; k < cnt; k++) {
+                int fd;
+                memcpy(&fd, CMSG_DATA(cm) + k * sizeof(int), sizeof fd);
+                if (c->sess.role == CMD_ROLE_AGENT && nfds == 0 && c->sess.fd_in < 0)
+                    c->sess.fd_in = fd;
+                else {
+                    close(fd);
+                    c->fd_error = 1;
+                }
+                nfds++;
+            }
+        }
+        if (mh.msg_flags & MSG_CTRUNC)
+            c->fd_error = 1;
+    }
     if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
         client_close(c);
         return;
@@ -182,11 +228,14 @@ static void listener_cb(struct evsrc *s, uint32_t events) {
     c->src.fd = fd;
     c->src.cb = client_cb;
     c->in_use = 1;
+    c->fd_error = 0;
+    cmd_session_open(&c->sess, cl == sizeof cred ? (int)cred.pid : 0, (unsigned)cred.uid);
     c->last_ns = clock_now_ns();
     c->tx_len = c->tx_off = 0;
     frame_rx_init(&c->rx);
     if (ev_add(&c->src, EPOLLIN) < 0) {
         close(fd);
+        cmd_session_close(&c->sess);
         c->in_use = 0;
     }
 }

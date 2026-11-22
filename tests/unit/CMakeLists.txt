@@ -9,7 +9,8 @@ add_library(unit_extras STATIC
   ${CMAKE_SOURCE_DIR}/src/vrctl/json_in.c
   ${CMAKE_SOURCE_DIR}/src/daemon/linkmon_parse.c
   ${CMAKE_SOURCE_DIR}/src/daemon/privdrop.c
-  ${CMAKE_SOURCE_DIR}/src/ctl/config.c)
+  ${CMAKE_SOURCE_DIR}/src/ctl/config.c
+  ${CMAKE_SOURCE_DIR}/src/ctl/fdcheck.c)
 target_include_directories(unit_extras PUBLIC ${CMAKE_SOURCE_DIR}/src/vrctl ${CMAKE_SOURCE_DIR}/src/daemon)
 target_link_libraries(unit_extras minivr_dp)
 

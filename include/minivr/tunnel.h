@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "cmd.h"
+#include "owner.h"
 #include "stats.h"
 
 #define LABEL_MAX_MAPPINGS 1024
@@ -16,6 +17,7 @@
 struct node {
     uint8_t id;
     bool in_use;
+    uint8_t owner;
     char name[NODE_NAME_MAX + 1];
     uint32_t ip;
     uint8_t rmac[6];
@@ -37,6 +39,7 @@ unsigned node_count(void);
 int label_add(uint32_t label, uint8_t port, struct cmd_err *err);
 int label_del(uint32_t label, struct cmd_err *err); /* not-found */
 int label_lookup(uint32_t label);                    /* port id, or -1 */
+int label_owner(uint32_t label);                     /* enum owner, or -1 */
 void label_del_port(uint8_t port);                   /* a deleted port takes its labels with it */
 unsigned label_count(void);
 unsigned label_count_vrf(unsigned vrf);
@@ -48,6 +51,7 @@ void label_walk(label_walk_fn fn, void *arg); /* ascending label order */
 int vni_add(uint32_t vni, unsigned vrf, struct cmd_err *err);
 int vni_del(uint32_t vni, struct cmd_err *err); /* not-found */
 int vni_lookup(uint32_t vni);                    /* VRF id, or -1 */
+int vni_owner(uint32_t vni);                     /* enum owner, or -1 */
 unsigned vni_count(void);
 unsigned tunnel_vni_count_vrf(unsigned vrf);
 typedef void (*vni_walk_fn)(uint32_t vni, unsigned vrf, void *arg);

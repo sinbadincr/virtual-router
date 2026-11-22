@@ -18,9 +18,15 @@ struct pio_ops {
     int (*fd)(void *h);                         /* pollable fd, -1 if none */
     int (*get_mac)(void *h, uint8_t mac[6]);    /* 0 on success */
     int (*get_mtu)(void *h);                    /* MTU or <0 */
+    /* Wrap an already open socket (runtime ports, phase 3); ownership of fd passes to the handle
+     * on success, the caller keeps it on failure. NULL when unsupported. */
+    void *(*adopt)(int fd, const char *ifname);
 };
 
 #define PIO_BURST 32
 
 extern const struct pio_ops pio_afpacket_ops;
+
+/* Open a bound, configured AF_PACKET socket for `ifname` (needs CAP_NET_RAW); -1 on failure. */
+int afp_socket_open(const char *ifname);
 #endif

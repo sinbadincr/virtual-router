@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "cmd.h"
+#include "owner.h"
 #include "lpm.h"
 #include "port.h"
 #include "stats.h"
@@ -25,6 +26,7 @@ struct route {
     enum encap_kind encap;
     uint32_t tag;     /* REMOTE: MPLS label or VNI */
     enum route_origin origin;
+    uint8_t owner; /* enum owner; connected/host routes take their port's owner */
     uint8_t used;
     uint32_t next_free;
 };
@@ -67,6 +69,8 @@ unsigned route_count_vrf(unsigned vrf);
 void route_walk(unsigned vrf, route_walk_fn fn, void *arg); /* prefix order */
 bool route_port_has_static(unsigned vrf, uint8_t port);
 bool route_node_in_use(uint8_t node);
+/* Remove the connected route of a VM port being deleted (the other ports on the prefix keep it). */
+void route_port_removed(const struct port *p);
 /* Move a VM port's connected and host routes between VRFs, all or nothing. */
 int route_move_port(const struct port *p, uint8_t from, uint8_t to, struct cmd_err *err);
 void route_reset(void); /* tests: all routes, VRFs and tunnel tables back to the empty state */

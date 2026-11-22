@@ -149,11 +149,11 @@ static void state_digest(char *dst, size_t cap) {
 TEST(show_commands_json_shapes) {
     fx_setup(1);
     CHECK(cli("route show") == 0);
-    CHECK(strstr(out, "{\"vrf\":\"default\",\"prefix\":\"10.0.1.0/24\",\"port\":null,\"gateway\":null,\"origin\":\"connected\"}"));
-    CHECK(strstr(out, "{\"vrf\":\"default\",\"prefix\":\"10.0.1.11/32\",\"port\":\"p1\",\"gateway\":null,\"origin\":\"host\"}"));
+    CHECK(strstr(out, "{\"vrf\":\"default\",\"prefix\":\"10.0.1.0/24\",\"port\":null,\"gateway\":null,\"origin\":\"connected\",\"owner\":\"config\"}"));
+    CHECK(strstr(out, "{\"vrf\":\"default\",\"prefix\":\"10.0.1.11/32\",\"port\":\"p1\",\"gateway\":null,\"origin\":\"host\",\"owner\":\"config\"}"));
     CHECK(cli("neigh show") == 0);
     CHECK(strstr(out, "{\"vrf\":\"default\",\"ip\":\"10.0.2.13\",\"mac\":\"02:00:00:00:01:03\",\"port\":\"p3\","
-                      "\"kind\":\"static\",\"state\":\"REACHABLE\",\"held\":0}"));
+                      "\"kind\":\"static\",\"state\":\"REACHABLE\",\"held\":0,\"owner\":\"config\"}"));
     CHECK(cli("port show") == 0);
     CHECK(strstr(out, "\"name\":\"p1\",\"ifname\":\"p1\",\"role\":\"vm\",\"vrf\":\"default\",\"mac\":\"02:00:00:00:00:01\","
                       "\"ip\":\"10.0.1.1/24\",\"mtu\":1500,\"admin\":\"up\",\"oper\":\"up\""));
@@ -273,10 +273,10 @@ TEST(show_commands_are_paged) {
     /* default page: fits one response, says where the next page starts */
     CHECK(cli("route show") == 0);
     CHECK(strstr(out, "\"total\":1205,\"offset\":0,"));
-    CHECK(strstr(out, "\"next_offset\":500}"));
-    CHECK(cli("route show offset 500 limit 700") == 0);
+    CHECK(strstr(out, "\"next_offset\":400}"));
+    CHECK(cli("route show offset 500 limit 600") == 0);
     CHECK(strstr(out, "\"offset\":500,"));
-    CHECK(strstr(out, "\"next_offset\":1200}"));
+    CHECK(strstr(out, "\"next_offset\":1100}"));
     CHECK(cli("route show offset 1200") == 0); /* last page: 5 routes, next_offset null */
     CHECK(strstr(out, "\"next_offset\":null}"));
     CHECK(cli("route show limit 0") == -1);
@@ -390,18 +390,18 @@ TEST(no_underlay_error) {
 TEST(vrf_show_node_show_tunnel_show_shapes) {
     CHECK_EQ_U64(ov_setup(1, 1600), 0);
     CHECK(cli("vrf show") == 0);
-    CHECK(strstr(out, "{\"name\":\"default\",\"id\":0,\"ports\":[],\"routes\":0,\"neighbours\":0,\"labels\":0,\"vnis\":0}"));
-    CHECK(strstr(out, "{\"name\":\"red\",\"id\":1,\"ports\":[\"red1\"],\"routes\":4,\"neighbours\":1,\"labels\":1,\"vnis\":0}"));
-    CHECK(strstr(out, "{\"name\":\"blue\",\"id\":2,\"ports\":[\"blue1\"],\"routes\":4,\"neighbours\":1,\"labels\":0,\"vnis\":1}"));
+    CHECK(strstr(out, "{\"name\":\"default\",\"id\":0,\"ports\":[],\"routes\":0,\"neighbours\":0,\"labels\":0,\"vnis\":0,\"owner\":\"config\"}"));
+    CHECK(strstr(out, "{\"name\":\"red\",\"id\":1,\"ports\":[\"red1\"],\"routes\":4,\"neighbours\":1,\"labels\":1,\"vnis\":0,\"owner\":\"config\"}"));
+    CHECK(strstr(out, "{\"name\":\"blue\",\"id\":2,\"ports\":[\"blue1\"],\"routes\":4,\"neighbours\":1,\"labels\":0,\"vnis\":1,\"owner\":\"config\"}"));
     CHECK(cli("node show") == 0);
     CHECK(strstr(out, "\"name\":\"cn2\",\"ip\":\"172.16.0.2\",\"rmac\":\"02:00:00:ff:00:02\",\"underlay_mac\":null,\"state\":\"unresolved\""));
     CHECK(strstr(out, "\"encap\":{\"mplsoudp\":{\"pkts\":0,\"bytes\":0},\"vxlan\":{\"pkts\":0,\"bytes\":0}},\"decap\":{"));
     CHECK(cli("tunnel show") == 0);
-    CHECK(strstr(out, "\"labels\":[{\"label\":1011,\"port\":\"red1\",\"vrf\":\"red\"}]"));
-    CHECK(strstr(out, "\"vnis\":[{\"vni\":200,\"vrf\":\"blue\"}]"));
+    CHECK(strstr(out, "\"labels\":[{\"label\":1011,\"port\":\"red1\",\"vrf\":\"red\",\"owner\":\"config\"}]"));
+    CHECK(strstr(out, "\"vnis\":[{\"vni\":200,\"vrf\":\"blue\",\"owner\":\"config\"}]"));
     CHECK(strstr(out, "\"underlay\":{\"port\":\"u0\",\"ip\":\"172.16.0.1/24\",\"mac\":\"02:00:00:ff:00:01\",\"mtu\":1600}"));
     CHECK(cli("route show vrf red") == 0);
-    CHECK(strstr(out, "{\"vrf\":\"red\",\"prefix\":\"10.1.1.12/32\",\"port\":null,\"gateway\":null,\"origin\":\"remote\",\"node\":\"cn2\",\"encap\":\"mplsoudp\",\"tag\":1012}"));
+    CHECK(strstr(out, "{\"vrf\":\"red\",\"prefix\":\"10.1.1.12/32\",\"port\":null,\"gateway\":null,\"origin\":\"remote\",\"node\":\"cn2\",\"encap\":\"mplsoudp\",\"tag\":1012,\"owner\":\"config\"}"));
     CHECK(strstr(out, "\"total\":4"));
     CHECK(cli("route show vrf blue") == 0);
     CHECK(strstr(out, "\"encap\":\"vxlan\",\"tag\":200"));
@@ -449,11 +449,11 @@ TEST(vrf_and_tunnel_show_follow_live_changes) {
     CHECK_EQ_U64(ov_setup(1, 1600), 0);
     CHECK(cli("vrf add green id 3") == 0);
     CHECK(cli("vrf show") == 0);
-    CHECK(strstr(out, "{\"name\":\"green\",\"id\":3,\"ports\":[],\"routes\":0,\"neighbours\":0,\"labels\":0,\"vnis\":0}"));
+    CHECK(strstr(out, "{\"name\":\"green\",\"id\":3,\"ports\":[],\"routes\":0,\"neighbours\":0,\"labels\":0,\"vnis\":0,\"owner\":\"cli\"}"));
     CHECK(cli("vni add 500 vrf green") == 0);
     CHECK(cli("label add 3000 port red1") == 0);
     CHECK(cli("vrf show") == 0);
-    CHECK(strstr(out, "\"name\":\"green\",\"id\":3,\"ports\":[],\"routes\":0,\"neighbours\":0,\"labels\":0,\"vnis\":1}"));
+    CHECK(strstr(out, "\"name\":\"green\",\"id\":3,\"ports\":[],\"routes\":0,\"neighbours\":0,\"labels\":0,\"vnis\":1,\"owner\":\"cli\"}"));
     CHECK(strstr(out, "\"name\":\"red\",\"id\":1,\"ports\":[\"red1\"],\"routes\":4,\"neighbours\":1,\"labels\":2,"));
     CHECK(cli("vrf del green") == -1);
     CHECK_STR_EQ(cerr.code, "busy"); /* a VNI maps to it */
@@ -464,7 +464,7 @@ TEST(vrf_and_tunnel_show_follow_live_changes) {
     CHECK(cli("vni del 500") == 0);
     CHECK(cli("vrf del green") == 0);
     CHECK(cli("tunnel show") == 0);
-    CHECK(strstr(out, "{\"label\":3000,\"port\":\"red1\",\"vrf\":\"red\"}"));
+    CHECK(strstr(out, "{\"label\":3000,\"port\":\"red1\",\"vrf\":\"red\",\"owner\":\"cli\"}"));
     CHECK(cli("label del 3000") == 0);
     CHECK(cli("tunnel show") == 0);
     CHECK(strstr(out, "{\"label\":3000") == NULL);

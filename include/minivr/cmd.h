@@ -24,6 +24,36 @@ const char *cmd_parse_prefix(const char *s, uint32_t *ip, uint8_t *len);       /
 const char *cmd_parse_mac(const char *s, uint8_t mac[6]);                      /* bad-mac */
 const char *cmd_parse_uint(const char *s, uint64_t min, uint64_t max, uint64_t *out); /* bad-syntax */
 
+/* Control connections (phase 3): a session carries the role (cli | agent) that decides the owner
+ * stamped on new entries and the ownership checks on del/replace/set. The config file has no
+ * session. A session may carry one fd received with SCM_RIGHTS (used by `port add ... fd`). */
+enum cmd_role { CMD_ROLE_CLI = 0, CMD_ROLE_AGENT = 1 };
+
+struct cmd_session {
+    int in_use;
+    unsigned id;
+    enum cmd_role role;
+    int peer_pid;
+    unsigned peer_uid;
+    uint64_t since_ns;
+    uint64_t requests;
+    int fd_in; /* passed fd not yet consumed, or -1 */
+};
+
+#define CMD_MAX_SESSIONS 8
+void cmd_session_open(struct cmd_session *s, int peer_pid, unsigned peer_uid); /* registers */
+void cmd_session_close(struct cmd_session *s);                                 /* closes fd_in */
+/* Run one command on a CLI or agent session (where = CMD_CLI). */
+int cmd_exec_session(struct cmd_session *s, const char *line, struct jw *out, struct cmd_err *err);
+
+/* Validates an fd passed with `port add ... fd` (set by the daemon to fd_check_afpacket; unit
+ * tests leave it unset, which accepts any fd). Returns NULL or an error message. */
+typedef const char *(*cmd_fd_checker)(int fd, const char *ifname);
+void cmd_set_fd_checker(cmd_fd_checker fn);
+
+/* 16 hex digits identifying this process start (`version`); tests may override. */
+void cmd_set_boot_id(const char *hex16);
+
 void cmd_init(void); /* records the start time for `version` uptime */
 
 /* Parse and run one command line. Always writes the full response envelope to `out`

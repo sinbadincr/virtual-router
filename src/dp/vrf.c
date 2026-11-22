@@ -77,6 +77,7 @@ int vrf_add(const char *name, unsigned id, struct cmd_err *err) {
         return cmd_fail(err, "table-full", "route table full");
     v->id = (uint8_t)id;
     v->in_use = true;
+    v->owner = (uint8_t)g_owner_ctx;
     strcpy(v->name, name);
     return 0;
 }

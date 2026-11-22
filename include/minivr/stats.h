@@ -39,7 +39,8 @@
     X(BAD_INNER_L2, "bad_inner_l2")                                                                \
     X(UNKNOWN_TAG, "unknown_tag")                                                                  \
     X(DECAP_NO_LOCAL_DEST, "decap_no_local_dest")                                                  \
-    X(TUNNEL_MTU_EXCEEDED, "tunnel_mtu_exceeded")
+    X(TUNNEL_MTU_EXCEEDED, "tunnel_mtu_exceeded")                                                  \
+    X(PORT_DELETED, "port_deleted")
 
 enum drop_reason {
 #define X(id, name) DROP_##id,

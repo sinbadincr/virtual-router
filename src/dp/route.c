@@ -104,6 +104,7 @@ static int insert(struct vrf *v, uint32_t prefix, uint8_t len, const struct nh *
     r->len = len;
     r->vrf = v->id;
     r->origin = origin;
+    r->owner = (uint8_t)g_owner_ctx;
     fill(r, nh);
     int rc = lpm_add(vrf_pool(), &v->root, prefix, len, idx);
     if (rc != 0) {
@@ -154,7 +155,11 @@ int route_add_connected(const struct port *p, struct cmd_err *err) {
         return cmd_fail(err, "exists", "a route for the port subnet already exists");
     }
     struct nh nh = {.kind = NH_LOCAL, .port = p->id};
-    return insert(v, prefix, p->prefix_len, &nh, ROUTE_CONNECTED, err);
+    enum owner saved = g_owner_ctx;
+    g_owner_ctx = (enum owner)p->owner;
+    int rc = insert(v, prefix, p->prefix_len, &nh, ROUTE_CONNECTED, err);
+    g_owner_ctx = saved;
+    return rc;
 }
 
 /* Undo route_add_connected for `p` in `vrf` (the other ports on the prefix keep it). */
@@ -180,7 +185,13 @@ int route_add_host(unsigned vrf, uint32_t ip, uint8_t port, struct cmd_err *err)
     if (!v)
         return -1;
     struct nh nh = {.kind = NH_LOCAL, .port = port};
-    return insert(v, ip, 32, &nh, ROUTE_HOST, err);
+    const struct port *pp = port_get(port);
+    enum owner saved = g_owner_ctx;
+    if (pp)
+        g_owner_ctx = (enum owner)pp->owner;
+    int rc = insert(v, ip, 32, &nh, ROUTE_HOST, err);
+    g_owner_ctx = saved;
+    return rc;
 }
 
 int route_del_host(unsigned vrf, uint32_t ip) {
@@ -192,6 +203,10 @@ int route_del_host(unsigned vrf, uint32_t ip) {
     lpm_del(vrf_pool(), &v->root, ip, 32);
     slot_free(idx);
     return 0;
+}
+
+void route_port_removed(const struct port *p) {
+    connected_remove(p, p->vrf);
 }
 
 int route_move_port(const struct port *p, uint8_t from, uint8_t to, struct cmd_err *err) {

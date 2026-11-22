@@ -5,11 +5,19 @@
 #include "minivr/clock.h"
 #include "minivr/neigh.h"
 #include "minivr/route.h"
+#include "minivr/tunnel.h"
 #include "minivr/vrf.h"
 #include "pio.h"
 
 static struct port ports[MAX_PORTS];
 static const struct pio_ops *backend;
+static void (*hook_added)(struct port *p);
+static void (*hook_removed)(struct port *p);
+
+void port_set_hooks(void (*added)(struct port *p), void (*removed)(struct port *p)) {
+    hook_added = added;
+    hook_removed = removed;
+}
 
 void port_set_backend(const struct pio_ops *ops) {
     backend = ops;
@@ -62,8 +70,9 @@ uint32_t port_netmask(const struct port *p) {
     return p->prefix_len == 0 ? 0 : ~0U << (32 - p->prefix_len);
 }
 
-struct port *port_add(const char *name, const char *ifname, uint32_t ip, uint8_t prefix_len,
-                      enum port_role role, unsigned vrf, struct cmd_err *err) {
+static struct port *port_add_impl(const char *name, const char *ifname, int *fd, uint32_t ip,
+                                  uint8_t prefix_len, enum port_role role, unsigned vrf,
+                                  struct cmd_err *err) {
     if (!backend) {
         cmd_fail(err, "not-found", "no packet I/O backend configured");
         return NULL;
@@ -110,9 +119,20 @@ struct port *port_add(const char *name, const char *ifname, uint32_t ip, uint8_t
         cmd_fail(err, "table-full", "at most %d VM ports", MAX_VM_PORTS);
         return NULL;
     }
-    void *h = backend->open(ifname);
+    void *h;
+    if (fd) {
+        if (!backend->adopt) {
+            cmd_fail(err, "bad-fd", "backend %s cannot adopt a socket", backend->name);
+            return NULL;
+        }
+        h = backend->adopt(*fd, ifname);
+        if (h)
+            *fd = -1; /* the handle owns it now */
+    } else {
+        h = backend->open(ifname);
+    }
     if (!h) {
-        cmd_fail(err, "not-found", "cannot open interface %s", ifname);
+        cmd_fail(err, fd ? "bad-fd" : "not-found", "cannot open interface %s", ifname);
         return NULL;
     }
     uint8_t mac[6];
@@ -126,6 +146,7 @@ struct port *port_add(const char *name, const char *ifname, uint32_t ip, uint8_t
     slot->id = (uint8_t)(slot - ports);
     slot->in_use = true;
     slot->role = role;
+    slot->owner = (uint8_t)g_owner_ctx;
     slot->vrf = role == PORT_VM ? (uint8_t)vrf : 0;
     strncpy(slot->name, name, sizeof slot->name - 1);
     strncpy(slot->ifname, ifname, sizeof slot->ifname - 1);
@@ -142,7 +163,35 @@ struct port *port_add(const char *name, const char *ifname, uint32_t ip, uint8_t
         memset(slot, 0, sizeof *slot);
         return NULL;
     }
+    if (hook_added)
+        hook_added(slot);
     return slot;
+}
+
+struct port *port_add(const char *name, const char *ifname, uint32_t ip, uint8_t prefix_len,
+                      enum port_role role, unsigned vrf, struct cmd_err *err) {
+    return port_add_impl(name, ifname, NULL, ip, prefix_len, role, vrf, err);
+}
+
+struct port *port_add_adopted(const char *name, const char *ifname, int *fd, uint32_t ip,
+                              uint8_t prefix_len, unsigned vrf, struct cmd_err *err) {
+    return port_add_impl(name, ifname, fd, ip, prefix_len, PORT_VM, vrf, err);
+}
+
+int port_del(struct port *p, struct cmd_err *err) {
+    if (p->role == PORT_UNDERLAY)
+        return cmd_fail(err, "immutable", "the underlay port cannot be deleted");
+    if (route_port_has_static(p->vrf, p->id))
+        return cmd_fail(err, "busy", "a static route still uses port %s", p->name);
+    neigh_port_removed(p->id);
+    label_del_port(p->id);
+    route_port_removed(p);
+    if (hook_removed)
+        hook_removed(p);
+    if (backend)
+        backend->close(p->pio);
+    memset(p, 0, sizeof *p);
+    return 0;
 }
 
 int port_set_vrf(struct port *p, unsigned vrf, struct cmd_err *err) {
@@ -180,6 +229,7 @@ void port_close_all(void) {
 }
 
 void port_reset(void) {
+    hook_added = hook_removed = NULL;
     port_close_all();
     memset(ports, 0, sizeof ports);
 }

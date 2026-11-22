@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "cmd.h"
+#include "owner.h"
 #include "mbuf.h"
 
 #define NEIGH_CAPACITY 1024
@@ -21,6 +22,7 @@ struct neigh {
     uint32_t ip;
     uint8_t mac[6];
     uint8_t port;
+    uint8_t owner; /* enum owner; learned entries are never agent-owned */
     enum neigh_kind kind;
     enum neigh_state state;
     uint8_t nhold;
@@ -52,6 +54,9 @@ void neigh_port_down(uint8_t port);
 void neigh_gateway_removed(unsigned table, uint32_t gw);
 /* A VM port moved to another VRF: learned entries are flushed, the static one is re-keyed. */
 void neigh_port_set_vrf(uint8_t port, uint8_t new_vrf);
+/* A port is being deleted: every neighbour on it goes (static ones take their host route and the
+ * source binding), held packets are freed and counted as port_deleted. */
+void neigh_port_removed(uint8_t port);
 
 /* Source binding of a port = its single static neighbour (FR-014a). */
 bool neigh_binding(uint8_t port, uint32_t *ip, uint8_t mac[6]);

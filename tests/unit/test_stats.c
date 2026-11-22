@@ -13,10 +13,11 @@ static const char *expected[] = {
     "tx_error",
     "tunnel_not_for_us", "underlay_unexpected", "bad_udp", "bad_vxlan", "bad_mpls",
     "bad_inner_l2",     "unknown_tag",          "decap_no_local_dest", "tunnel_mtu_exceeded",
+    "port_deleted",
 };
 
 TEST(all_reasons_have_stable_names) {
-    CHECK_EQ_U64(DROP_COUNT, 30);
+    CHECK_EQ_U64(DROP_COUNT, 31);
     for (int i = 0; i < DROP_COUNT; i++)
         CHECK_STR_EQ(stats_reason_name((enum drop_reason)i), expected[i]);
 }
@@ -98,4 +99,12 @@ TEST(nine_new_reasons_keep_total_equal_to_the_sum) {
     CHECK_EQ_U64(DROP_TUNNEL_MTU_EXCEEDED - DROP_TUNNEL_NOT_FOR_US + 1, 9);
     CHECK_EQ_U64(g_stats.drop_total, 9);
     CHECK_EQ_U64(stats_reason_sum(), 9);
+}
+
+TEST(port_deleted_is_a_named_reason_inside_the_total) {
+    stats_clear();
+    stats_drop(DROP_PORT_DELETED);
+    CHECK_STR_EQ(stats_reason_name(DROP_PORT_DELETED), "port_deleted");
+    CHECK_EQ_U64(g_stats.drop_total, 1);
+    CHECK_EQ_U64(stats_reason_sum(), 1);
 }
