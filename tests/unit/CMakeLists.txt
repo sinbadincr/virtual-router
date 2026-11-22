@@ -10,7 +10,11 @@ add_library(unit_extras STATIC
   ${CMAKE_SOURCE_DIR}/src/daemon/linkmon_parse.c
   ${CMAKE_SOURCE_DIR}/src/daemon/privdrop.c
   ${CMAKE_SOURCE_DIR}/src/ctl/config.c
-  ${CMAKE_SOURCE_DIR}/src/ctl/fdcheck.c)
+  ${CMAKE_SOURCE_DIR}/src/ctl/fdcheck.c
+  ${CMAKE_SOURCE_DIR}/src/controller/store.c
+  ${CMAKE_SOURCE_DIR}/src/common/tcp.c
+  ${CMAKE_SOURCE_DIR}/src/common/unixsock.c
+  ${CMAKE_SOURCE_DIR}/src/daemon/evloop.c)
 target_include_directories(unit_extras PUBLIC ${CMAKE_SOURCE_DIR}/src/daemon)
 target_link_libraries(unit_extras minivr_ctrl minivr_dp)
 

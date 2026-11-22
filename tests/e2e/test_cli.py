@@ -45,10 +45,10 @@ def test_json_shapes(forwarder):
     assert r["ok"] is True
     # phase 2 adds `vrf` (always "default" here) to every route (specs/003 contracts/cli.md)
     assert {"vrf": "default", "prefix": "10.0.1.0/24", "port": None, "gateway": None,
-            "origin": "connected"} in r["data"]["routes"]
+            "origin": "connected", "owner": "config"} in r["data"]["routes"]
     p = vrctl("port", "show")["data"]["ports"][0]
     assert set(p) == {"name", "ifname", "role", "vrf", "mac", "ip", "mtu", "admin", "oper", "rx_pkts",
-                      "rx_bytes", "tx_pkts", "tx_bytes", "drops"}
+                      "rx_bytes", "tx_pkts", "tx_bytes", "drops", "owner"}  # owner: phase 3
     assert p["role"] == "vm" and p["vrf"] == "default"
     s = stats()
     assert set(s) == {"ports", "drops", "events", "nodes", "mbuf"}  # nodes: phase 2
@@ -96,7 +96,7 @@ def test_v11_drop_counters_add_up(forwarder):
     d = stats()["drops"]
     assert d["total"] >= 5
     assert d["total"] == sum(d["reasons"].values())  # SC-007
-    assert len(d["reasons"]) == 30  # 21 of phase 1 + 9 tunnel reasons (phase 2)
+    assert len(d["reasons"]) == 31  # 21 of phase 1 + 9 tunnel reasons (phase 2) + port_deleted (phase 3)
 
 
 def test_stats_clear_zeroes_counters_but_not_gauges(forwarder):

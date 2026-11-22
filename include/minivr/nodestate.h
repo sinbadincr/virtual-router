@@ -67,4 +67,9 @@ struct ndiff {
 int ns_diff(const struct nstate *have, const struct nstate *want, struct ndiff *out);
 /* Apply a diff to `s` (dels first, then adds). */
 int ns_apply(struct nstate *s, const struct ndiff *d);
+
+/* dotted quad, aa:bb:cc:dd:ee:ff, a.b.c.d/len (no stdio: these live in the pure library) */
+void ne_ip_str(uint32_t ip, char out[16]);
+void ne_mac_str(const uint8_t m[6], char out[18]);
+void ne_prefix_str(uint32_t ip, uint8_t len, char out[20]);
 #endif

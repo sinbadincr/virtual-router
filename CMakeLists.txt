@@ -24,7 +24,8 @@ add_library(minivr_dp STATIC ${DP_SRC})
 # Pure control-plane library (phase 3): protocol codec, node-state sets, controller model/compute,
 # agent reconcile. No I/O, no syscalls, no heap (scripts/check-fastpath.sh enforces it).
 file(GLOB CTRL_SRC CONFIGURE_DEPENDS src/proto/*.c)
-set(CTRL_SRC ${CTRL_SRC} src/common/nodestate.c)
+set(CTRL_SRC ${CTRL_SRC} src/common/nodestate.c src/controller/model.c src/controller/compute.c
+    src/controller/alloc.c src/controller/grammar.c src/agent/reconcile.c)
 add_library(minivr_ctrl STATIC ${CTRL_SRC})
 target_link_libraries(minivr_ctrl minivr_dp)
 
@@ -37,6 +38,23 @@ target_link_options(minivrd PRIVATE -rdynamic) # symbol names in crash backtrace
 file(GLOB VRCTL_SRC CONFIGURE_DEPENDS src/vrctl/*.c)
 add_executable(vrctl ${VRCTL_SRC} src/common/json_in.c)
 target_link_libraries(vrctl minivr_dp)
+
+# Controller and agent (phase 3). Sources are added as they are written (tasks T032-T043).
+set(CTL_COMMON src/common/tcp.c src/common/unixsock.c src/common/json_in.c src/daemon/privdrop.c
+    src/daemon/evloop.c)
+file(GLOB CTLD_SRC CONFIGURE_DEPENDS src/controller/session.c src/controller/store.c
+     src/controller/localctl.c src/controller/main.c)
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/controller/main.c)
+  add_executable(minivr-ctld ${CTLD_SRC} ${CTL_COMMON})
+  target_link_libraries(minivr-ctld minivr_ctrl minivr_dp)
+endif()
+file(GLOB AGENT_SRC CONFIGURE_DEPENDS src/agent/fwd.c src/agent/bindings.c src/agent/session.c
+     src/agent/localctl.c src/agent/main.c)
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/agent/main.c)
+  add_executable(minivr-agent ${AGENT_SRC} ${CTL_COMMON}
+                 src/pio/pio_afpacket.c)
+  target_link_libraries(minivr-agent minivr_ctrl minivr_dp)
+endif()
 
 enable_testing()
 add_subdirectory(tests/unit)

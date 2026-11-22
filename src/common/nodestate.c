@@ -196,3 +196,40 @@ int ns_apply(struct nstate *s, const struct ndiff *d) {
             return -1;
     return 0;
 }
+
+/* ---- text helpers shared by the controller, the agent and the CLIs ---- */
+
+void ne_ip_str(uint32_t ip, char out[16]) {
+    char *p = out;
+    for (int i = 3; i >= 0; i--) {
+        unsigned o = (ip >> (8 * i)) & 255;
+        if (o >= 100)
+            *p++ = (char)('0' + o / 100);
+        if (o >= 10)
+            *p++ = (char)('0' + (o / 10) % 10);
+        *p++ = (char)('0' + o % 10);
+        if (i)
+            *p++ = '.';
+    }
+    *p = 0;
+}
+
+void ne_mac_str(const uint8_t m[6], char out[18]) {
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 6; i++) {
+        out[i * 3] = hex[m[i] >> 4];
+        out[i * 3 + 1] = hex[m[i] & 15];
+        out[i * 3 + 2] = i < 5 ? ':' : 0;
+    }
+}
+
+void ne_prefix_str(uint32_t ip, uint8_t len, char out[20]) {
+    ne_ip_str(ip, out);
+    char *p = out + strlen(out);
+    *p++ = '/';
+    if (len >= 10)
+        *p++ = (char)('0' + len / 10);
+    *p++ = (char)('0' + len % 10);
+    *p = 0;
+}
+

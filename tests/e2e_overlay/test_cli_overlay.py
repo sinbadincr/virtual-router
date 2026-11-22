@@ -12,7 +12,7 @@ def test_o9_json_fields_match_the_contract(fresh):
     d = v("cn1", "vrf", "show")["data"]["vrfs"]
     by = {x["name"]: x for x in d}
     assert set(by) == {"default", "red", "blue"}
-    assert set(by["red"]) == {"name", "id", "ports", "routes", "neighbours", "labels", "vnis"}
+    assert set(by["red"]) == {"name", "id", "ports", "routes", "neighbours", "labels", "vnis", "owner"}
     assert by["red"]["ports"] == ["red1"] and by["red"]["labels"] == 1 and by["blue"]["vnis"] == 1
     routes = v("cn1", "route", "show", "vrf", "red")["data"]["routes"]
     remote = [r for r in routes if r["origin"] == "remote"]
@@ -20,12 +20,12 @@ def test_o9_json_fields_match_the_contract(fresh):
         ("10.1.1.12/32", "cn2", "mplsoudp", 1012), ("10.1.2.13/32", "cn2", "mplsoudp", 1013)}
     assert all(r["vrf"] == "red" and r["port"] is None for r in remote)
     n = v("cn1", "node", "show")["data"]["nodes"][0]
-    assert set(n) == {"name", "ip", "rmac", "underlay_mac", "state", "encap", "decap"}
+    assert set(n) == {"name", "ip", "rmac", "underlay_mac", "state", "encap", "decap", "owner"}
     assert n["name"] == "cn2" and n["rmac"] == "02:00:00:ff:00:02"
     assert set(n["encap"]) == {"mplsoudp", "vxlan"} and set(n["encap"]["vxlan"]) == {"pkts", "bytes"}
     t = v("cn2", "tunnel", "show")["data"]
     assert [(x["label"], x["port"], x["vrf"]) for x in t["labels"]] == [(1012, "red2", "red"), (1013, "red3", "red")]
-    assert t["vnis"] == [{"vni": 200, "vrf": "blue"}]
+    assert t["vnis"] == [{"vni": 200, "vrf": "blue", "owner": "config"}]
     assert t["underlay"] == {"port": "u0", "ip": "172.16.0.2/24", "mac": "02:00:00:ff:00:02", "mtu": 1600}
     nb = v("cn1", "neigh", "show", "vrf", "blue")["data"]["neighbours"]
     assert {x["vrf"] for x in nb} == {"blue"}

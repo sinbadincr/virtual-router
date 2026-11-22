@@ -104,6 +104,13 @@ static int request(int fd, const char *cmd, char **resp, size_t *rlen) {
 }
 
 static int g_continuation; /* later pages of one listing: no repeated header */
+static int g_owner;        /* show the OWNER column: some row is not owned by `config` */
+
+static void hdr_end(void) {
+    if (g_owner)
+        printf("  OWNER");
+    putchar('\n');
+}
 
 static const char *sval(const struct jnode *o, const char *k, const char *dflt) {
     const struct jnode *n = json_get(o, k);
@@ -121,6 +128,24 @@ static int is_default_vrf(const struct jnode *r) {
     return strcmp(sval(r, "vrf", "default"), "default") == 0;
 }
 
+static void row_end(const struct jnode *r) {
+    if (g_owner) {
+        const struct jnode *o = json_get(r, "owner");
+        printf("  %s", o && o->str ? o->str : "config");
+    }
+    putchar('\n');
+}
+
+/* Phase 1 and 2 tables stay byte-identical while every entry is owned by `config`. */
+static int owners_shown(const struct jnode *list) {
+    for (const struct jnode *r = list ? list->child : NULL; r; r = r->next) {
+        const struct jnode *o = json_get(r, "owner");
+        if (o && o->str && strcmp(o->str, "config") != 0)
+            return 1;
+    }
+    return 0;
+}
+
 static int routes_extended(const struct jnode *list) {
     for (const struct jnode *r = list ? list->child : NULL; r; r = r->next)
         if (!is_default_vrf(r) || strcmp(sval(r, "origin", ""), "remote") == 0)
@@ -130,36 +155,78 @@ static int routes_extended(const struct jnode *list) {
 
 static void render_route_row(const struct jnode *r, int ext) {
     if (!ext) {
-        printf("%-16s%-6s%-12s%s\n", sval(r, "prefix", "?"), sval(r, "port", "-"),
+        printf("%-16s%-6s%-12s%s", sval(r, "prefix", "?"), sval(r, "port", "-"),
                sval(r, "gateway", "-"), sval(r, "origin", "?"));
+        row_end(r);
         return;
     }
     char nh[48] = "";
     if (strcmp(sval(r, "origin", ""), "remote") == 0)
         snprintf(nh, sizeof nh, "%s %s %llu", sval(r, "node", "?"), sval(r, "encap", "?"),
                  uval(r, "tag"));
-    printf("%-10s%-16s%-6s%-12s%-10s%s\n", sval(r, "vrf", "default"), sval(r, "prefix", "?"),
+    printf("%-10s%-16s%-6s%-12s%-10s%s", sval(r, "vrf", "default"), sval(r, "prefix", "?"),
            sval(r, "port", "-"), sval(r, "gateway", "-"), sval(r, "origin", "?"), nh);
+    row_end(r);
 }
 
 static void route_header(int ext) {
     if (ext)
-        printf("%-10s%-16s%-6s%-12s%-10s%s\n", "VRF", "PREFIX", "PORT", "GATEWAY", "ORIGIN",
+        printf("%-10s%-16s%-6s%-12s%-10s%s", "VRF", "PREFIX", "PORT", "GATEWAY", "ORIGIN",
                "REMOTE");
     else
-        printf("%-16s%-6s%-12s%s\n", "PREFIX", "PORT", "GATEWAY", "ORIGIN");
+        printf("%-16s%-6s%-12s%s", "PREFIX", "PORT", "GATEWAY", "ORIGIN");
+    hdr_end();
+}
+
+/* Commands without a table renderer (controller and agent views, session show, ...). */
+static void print_json(const struct jnode *n, int depth) {
+    if (!n) {
+        fputs("null", stdout);
+        return;
+    }
+    switch (n->type) {
+    case J_NULL: fputs("null", stdout); break;
+    case J_BOOL: fputs(n->b ? "true" : "false", stdout); break;
+    case J_NUM:
+        if (n->is_int)
+            printf("%llu", (unsigned long long)n->u);
+        else
+            printf("%g", n->d);
+        break;
+    case J_STR: printf("\"%s\"", n->str ? n->str : ""); break;
+    case J_ARR:
+    case J_OBJ: {
+        char open = n->type == J_ARR ? '[' : '{', close = n->type == J_ARR ? ']' : '}';
+        if (!n->child) {
+            printf("%c%c", open, close);
+            break;
+        }
+        printf("%c\n", open);
+        for (const struct jnode *c = n->child; c; c = c->next) {
+            printf("%*s", (depth + 1) * 2, "");
+            if (n->type == J_OBJ)
+                printf("\"%s\": ", c->key ? c->key : "");
+            print_json(c, depth + 1);
+            puts(c->next ? "," : "");
+        }
+        printf("%*s%c", depth * 2, "", close);
+        break;
+    }
+    }
 }
 
 static void render_table(const char *cmd, const struct jnode *d) {
     if (strcmp(cmd, "route show") == 0) {
         const struct jnode *list = json_get(d, "routes");
         int ext = routes_extended(list);
+        g_owner = owners_shown(list);
         if (!g_continuation)
             route_header(ext);
         for (const struct jnode *r = list ? list->child : NULL; r; r = r->next)
             render_route_row(r, ext);
     } else if (strcmp(cmd, "route lookup") == 0) {
         const struct jnode *r = json_get(d, "route");
+        g_owner = owners_shown(NULL) || (json_get(r, "owner") && strcmp(sval(r, "owner", "config"), "config") != 0);
         int ext = !is_default_vrf(r) || strcmp(sval(r, "origin", ""), "remote") == 0;
         route_header(ext);
         render_route_row(r, ext);
@@ -170,38 +237,47 @@ static void render_table(const char *cmd, const struct jnode *d) {
             ext |= !is_default_vrf(r);
         for (const struct jnode *r = list ? list->child : NULL; r; r = r->next)
             ext |= strcmp(sval(r, "role", "vm"), "underlay") == 0;
-        printf("%-6s%-8s%s%-19s%-17s%-6s%-6s%-6s%10s%12s%10s%12s%8s\n", "NAME", "IFNAME",
+        g_owner = owners_shown(list);
+        printf("%-6s%-8s%s%-19s%-17s%-6s%-6s%-6s%10s%12s%10s%12s%8s", "NAME", "IFNAME",
                ext ? "ROLE      VRF       " : "", "MAC", "IP", "MTU", "ADMIN", "OPER", "RX_PKTS",
                "RX_BYTES", "TX_PKTS", "TX_BYTES", "DROPS");
+        hdr_end();
         for (const struct jnode *r = list ? list->child : NULL; r; r = r->next) {
             char rv[32] = "";
             if (ext)
                 snprintf(rv, sizeof rv, "%-10s%-10s", sval(r, "role", "vm"), sval(r, "vrf", "-"));
-            printf("%-6s%-8s%s%-19s%-17s%-6llu%-6s%-6s%10llu%12llu%10llu%12llu%8llu\n",
+            printf("%-6s%-8s%s%-19s%-17s%-6llu%-6s%-6s%10llu%12llu%10llu%12llu%8llu",
                    sval(r, "name", "?"), sval(r, "ifname", "?"), rv, sval(r, "mac", "?"),
                    sval(r, "ip", "?"), uval(r, "mtu"), sval(r, "admin", "?"), sval(r, "oper", "?"),
                    uval(r, "rx_pkts"), uval(r, "rx_bytes"), uval(r, "tx_pkts"), uval(r, "tx_bytes"),
                    uval(r, "drops"));
+            row_end(r);
         }
     } else if (strcmp(cmd, "neigh show") == 0) {
         const struct jnode *list = json_get(d, "neighbours");
         int ext = 0;
         for (const struct jnode *r = list ? list->child : NULL; r; r = r->next)
             ext |= !is_default_vrf(r);
-        if (!g_continuation)
-            printf("%s%-16s%-19s%-6s%-9s%-12s%s\n", ext ? "VRF       " : "", "IP", "MAC", "PORT",
+        g_owner = owners_shown(list);
+        if (!g_continuation) {
+            printf("%s%-16s%-19s%-6s%-9s%-12s%s", ext ? "VRF       " : "", "IP", "MAC", "PORT",
                    "KIND", "STATE", "HELD");
+            hdr_end();
+        }
         for (const struct jnode *r = list ? list->child : NULL; r; r = r->next) {
             if (ext)
                 printf("%-10s", sval(r, "vrf", "?"));
-            printf("%-16s%-19s%-6s%-9s%-12s%llu\n", sval(r, "ip", "?"), sval(r, "mac", "-"),
+            printf("%-16s%-19s%-6s%-9s%-12s%llu", sval(r, "ip", "?"), sval(r, "mac", "-"),
                    sval(r, "port", "?"), sval(r, "kind", "?"), sval(r, "state", "?"),
                    uval(r, "held"));
+            row_end(r);
         }
     } else if (strcmp(cmd, "vrf show") == 0) {
-        printf("%-16s%-4s%-24s%7s%12s%8s%6s\n", "NAME", "ID", "PORTS", "ROUTES", "NEIGHBOURS",
-               "LABELS", "VNIS");
         const struct jnode *list = json_get(d, "vrfs");
+        g_owner = owners_shown(list);
+        printf("%-16s%-4s%-24s%7s%12s%8s%6s", "NAME", "ID", "PORTS", "ROUTES", "NEIGHBOURS",
+               "LABELS", "VNIS");
+        hdr_end();
         for (const struct jnode *r = list ? list->child : NULL; r; r = r->next) {
             char ports[96] = "";
             const struct jnode *pl = json_get(r, "ports");
@@ -209,23 +285,27 @@ static void render_table(const char *cmd, const struct jnode *d) {
                 size_t l = strlen(ports);
                 snprintf(ports + l, sizeof ports - l, "%s%s", l ? "," : "", p->str ? p->str : "?");
             }
-            printf("%-16s%-4llu%-24s%7llu%12llu%8llu%6llu\n", sval(r, "name", "?"), uval(r, "id"),
+            printf("%-16s%-4llu%-24s%7llu%12llu%8llu%6llu", sval(r, "name", "?"), uval(r, "id"),
                    ports[0] ? ports : "-", uval(r, "routes"), uval(r, "neighbours"),
                    uval(r, "labels"), uval(r, "vnis"));
+            row_end(r);
         }
     } else if (strcmp(cmd, "node show") == 0) {
-        printf("%-10s%-14s%-19s%-19s%-12s%s\n", "NAME", "IP", "RMAC", "UNDERLAY_MAC", "STATE",
-               "ENCAP(pkts/bytes) DECAP(pkts/bytes)  [mplsoudp | vxlan]");
         const struct jnode *list = json_get(d, "nodes");
+        g_owner = owners_shown(list);
+        printf("%-10s%-14s%-19s%-19s%-12s%s", "NAME", "IP", "RMAC", "UNDERLAY_MAC", "STATE",
+               "ENCAP(pkts/bytes) DECAP(pkts/bytes)  [mplsoudp | vxlan]");
+        hdr_end();
         for (const struct jnode *r = list ? list->child : NULL; r; r = r->next) {
             const struct jnode *en = json_get(r, "encap"), *de = json_get(r, "decap");
             const struct jnode *em = json_get(en, "mplsoudp"), *ev = json_get(en, "vxlan");
             const struct jnode *dm = json_get(de, "mplsoudp"), *dv = json_get(de, "vxlan");
-            printf("%-10s%-14s%-19s%-19s%-12s%llu/%llu | %llu/%llu   %llu/%llu | %llu/%llu\n",
+            printf("%-10s%-14s%-19s%-19s%-12s%llu/%llu | %llu/%llu   %llu/%llu | %llu/%llu",
                    sval(r, "name", "?"), sval(r, "ip", "?"), sval(r, "rmac", "-"),
                    sval(r, "underlay_mac", "-"), sval(r, "state", "?"), uval(em, "pkts"),
                    uval(em, "bytes"), uval(ev, "pkts"), uval(ev, "bytes"), uval(dm, "pkts"),
                    uval(dm, "bytes"), uval(dv, "pkts"), uval(dv, "bytes"));
+            row_end(r);
         }
     } else if (strcmp(cmd, "tunnel show") == 0) {
         const struct jnode *u = json_get(d, "underlay");
@@ -234,14 +314,20 @@ static void render_table(const char *cmd, const struct jnode *d) {
                    sval(u, "mac", "?"), uval(u, "mtu"));
         else
             puts("underlay none");
-        printf("\n%-10s%-8s%s\n", "LABEL", "PORT", "VRF");
-        const struct jnode *ll = json_get(d, "labels");
-        for (const struct jnode *r = ll ? ll->child : NULL; r; r = r->next)
-            printf("%-10llu%-8s%s\n", uval(r, "label"), sval(r, "port", "?"), sval(r, "vrf", "?"));
-        printf("\n%-10s%s\n", "VNI", "VRF");
-        const struct jnode *vl = json_get(d, "vnis");
-        for (const struct jnode *r = vl ? vl->child : NULL; r; r = r->next)
-            printf("%-10llu%s\n", uval(r, "vni"), sval(r, "vrf", "?"));
+        const struct jnode *ll = json_get(d, "labels"), *vl = json_get(d, "vnis");
+        g_owner = owners_shown(ll) || owners_shown(vl);
+        printf("\n%-10s%-8s%s", "LABEL", "PORT", "VRF");
+        hdr_end();
+        for (const struct jnode *r = ll ? ll->child : NULL; r; r = r->next) {
+            printf("%-10llu%-8s%s", uval(r, "label"), sval(r, "port", "?"), sval(r, "vrf", "?"));
+            row_end(r);
+        }
+        printf("\n%-10s%s", "VNI", "VRF");
+        hdr_end();
+        for (const struct jnode *r = vl ? vl->child : NULL; r; r = r->next) {
+            printf("%-10llu%s", uval(r, "vni"), sval(r, "vrf", "?"));
+            row_end(r);
+        }
     } else if (strcmp(cmd, "stats show") == 0) {
         printf("%-6s%10s%12s%10s%12s%8s\n", "PORT", "RX_PKTS", "RX_BYTES", "TX_PKTS", "TX_BYTES",
                "DROPS");
@@ -271,7 +357,8 @@ static void render_table(const char *cmd, const struct jnode *d) {
         const struct jnode *mb = json_get(d, "mbuf");
         printf("\nMBUF in_use %llu / %llu\n", uval(mb, "in_use"), uval(mb, "total"));
     } else {
-        puts("ok");
+        print_json(d, 0);
+        putchar('\n');
     }
 }
 
@@ -304,7 +391,9 @@ static int render(const char *cmd, const struct jnode *root, const char *raw, in
     if (strcmp(cmd, "version") == 0) {
         const struct jnode *v = json_get(d, "version"), *b = json_get(d, "build"),
                            *p = json_get(d, "protocol"), *u = json_get(d, "uptime_s");
-        printf("minivrd %s (%s build) protocol %llu uptime %llus\n", v && v->str ? v->str : "?",
+        const struct jnode *dm = json_get(d, "daemon");
+        printf("%s %s (%s build) protocol %llu uptime %llus\n", dm && dm->str ? dm->str : "minivrd",
+               v && v->str ? v->str : "?",
                b && b->str ? b->str : "?", p ? (unsigned long long)p->u : 0ULL,
                u ? (unsigned long long)u->u : 0ULL);
         return 0;
