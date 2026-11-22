@@ -444,3 +444,29 @@ TEST(a_failed_new_command_leaves_state_unchanged) {
     CHECK_EQ_U64(node_count(), nodes);
     ov_teardown();
 }
+
+TEST(vrf_and_tunnel_show_follow_live_changes) {
+    CHECK_EQ_U64(ov_setup(1, 1600), 0);
+    CHECK(cli("vrf add green id 3") == 0);
+    CHECK(cli("vrf show") == 0);
+    CHECK(strstr(out, "{\"name\":\"green\",\"id\":3,\"ports\":[],\"routes\":0,\"neighbours\":0,\"labels\":0,\"vnis\":0}"));
+    CHECK(cli("vni add 500 vrf green") == 0);
+    CHECK(cli("label add 3000 port red1") == 0);
+    CHECK(cli("vrf show") == 0);
+    CHECK(strstr(out, "\"name\":\"green\",\"id\":3,\"ports\":[],\"routes\":0,\"neighbours\":0,\"labels\":0,\"vnis\":1}"));
+    CHECK(strstr(out, "\"name\":\"red\",\"id\":1,\"ports\":[\"red1\"],\"routes\":4,\"neighbours\":1,\"labels\":2,"));
+    CHECK(cli("vrf del green") == -1);
+    CHECK_STR_EQ(cerr.code, "busy"); /* a VNI maps to it */
+    CHECK(cli("vni add 500 vrf green") == -1);
+    CHECK_STR_EQ(cerr.code, "exists");
+    CHECK(cli("label add 3000 port red1") == -1);
+    CHECK_STR_EQ(cerr.code, "exists");
+    CHECK(cli("vni del 500") == 0);
+    CHECK(cli("vrf del green") == 0);
+    CHECK(cli("tunnel show") == 0);
+    CHECK(strstr(out, "{\"label\":3000,\"port\":\"red1\",\"vrf\":\"red\"}"));
+    CHECK(cli("label del 3000") == 0);
+    CHECK(cli("tunnel show") == 0);
+    CHECK(strstr(out, "{\"label\":3000") == NULL);
+    ov_teardown();
+}
