@@ -357,6 +357,7 @@ case "${1:-}" in
   status) lab_status ;;
   snapshot) lab_snapshot ;;
   svc) shift; lab_svc "$@" ;;
+  guest) shift; lab_guest "$@" ;;
   ctl-cut) shift; lab_ctl_cut "$@" ;;
   ctl-diff) lab_ctl_diff ;;
   ssh) shift; lab_ssh "$@" ;;

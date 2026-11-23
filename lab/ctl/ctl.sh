@@ -212,3 +212,143 @@ lab_status_ctl() {
     echo "agent $n pid $(cat "$LAB_OUT/agent-$n.pid"): $("$VRCTL" -j -s "/run/mvr-$n/agent.sock" status 2>/dev/null | jq -r '.data.sync // "?"')"
   done
 }
+
+# ---- guests that come and go (US2): guest start|stop|move --------------------------------------
+# name node data-MAC address gateway mgmt-IP mgmt-TAP  (the spare guests of the ctl lab)
+CTL_SPARE=(
+  "red5 2 02:00:00:01:02:15 10.1.2.15/24 10.1.2.1 10.99.0.27 mr5"
+  "red4 3 02:00:00:01:03:14 10.1.1.14/24 10.1.1.1 10.99.0.26 mr4"
+)
+KVM_ALL_GUESTS+=(red4 red5)
+
+# sets G_NAME G_NODE(default n) G_MAC G_ADDR G_GW G_MIP G_MTAP G_PMAC(default node) or returns 1
+ctl_guest_info() {
+  local spec name node mac addr gw pmac mip mtap
+  for spec in "${OV_GUESTS[@]}"; do
+    read -r name node mac addr gw pmac mip mtap <<<"$spec"
+    if [ "$name" = "$1" ]; then
+      G_NAME=$name; G_NODE=$node; G_MAC=$mac; G_ADDR=$addr; G_GW=$gw; G_MIP=$mip; G_MTAP=$mtap; G_PMAC=$pmac
+      return 0
+    fi
+  done
+  for spec in "${CTL_SPARE[@]}"; do
+    read -r name node mac addr gw mip mtap <<<"$spec"
+    if [ "$name" = "$1" ]; then
+      G_NAME=$name; G_NODE=$node; G_MAC=$mac; G_ADDR=$addr; G_GW=$gw; G_MIP=$mip; G_MTAP=$mtap
+      G_PMAC=$(printf '02:00:00:0a:%02x:%02x' "$node" 0x20)
+      return 0
+    fi
+  done
+  return 1
+}
+
+# the node a guest is plugged on right now (from the agents), empty when nowhere
+ctl_guest_node() {
+  local n
+  for n in cn1 cn2 cn3; do
+    [ -S "/run/mvr-$n/agent.sock" ] || continue
+    "$VRCTL" -j -s "/run/mvr-$n/agent.sock" bindings show 2>/dev/null |
+      jq -e --arg g "$1" '.data.bindings[]? | select(.vmi == $g)' >/dev/null 2>&1 && { echo "$n"; return; }
+  done
+}
+
+ctl_kvm_register() { # guest node-number
+  local g=$1 n=$2
+  ctl_guest_info "$g"
+  kvm_use_topo overlay
+  local present=0 x
+  for x in "${KVM_GUESTS[@]}"; do [ "$x" = "$g" ] && present=1; done
+  [ $present -eq 1 ] || KVM_GUESTS+=("$g")
+  KVM_NODE_NS[$g]=mvr-cn$n
+  KVM_PORT[$g]=$g
+  KVM_PORT_MAC[$g]=$G_PMAC
+  [ "$n" = "$G_NODE" ] || KVM_PORT_MAC[$g]=$(printf '02:00:00:0a:%02x:%02x' "$n" 0x30)
+  KVM_MTAP[$g]=$G_MTAP
+  KVM_MGMT_IP[$g]=$G_MIP
+  KVM_DATA_MAC[$g]=$G_MAC
+  KVM_DATA_ADDR[$g]=$G_ADDR
+}
+
+ctl_guest_port_mac() { # guest node-number
+  ctl_guest_info "$1"
+  if [ "$2" = "$G_NODE" ]; then echo "$G_PMAC"; else printf '02:00:00:0a:%02x:%02x' "$2" 0x30; fi
+}
+
+lab_guest_start() { # guest [node]
+  need_root
+  ns_exists mvr-ctl || die "ctl lab is not up"
+  local g=${1:?guest} ctlnode=${2:-} n
+  ctl_bins
+  ctl_guest_info "$g" || die "unknown guest '$g'"
+  n=${ctlnode#cn}; [ -n "$n" ] || n=$G_NODE
+  ns_exists "mvr-cn$n" || die "node cn$n does not exist"
+  local cur; cur=$(ctl_guest_node "$g")
+  [ -z "$cur" ] || die "guest $g is already plugged on $cur"
+  local ns=mvr-cn$n pmac; pmac=$(ctl_guest_port_mac "$g" "$n")
+  if [ "$(lab_kind)" = ctl/kvm ]; then
+    ctl_kvm_register "$g" "$n"
+    kvm_tap "$ns" "$g" "$pmac"                       # 1. the TAP exists in the node
+    nsx "$ns" sysctl -qw "net.ipv4.conf.$g.arp_ignore=8"
+    nsx "$ns" sysctl -qw "net.ipv6.conf.$g.disable_ipv6=1" || true
+    no_offload "$ns" "$g"
+    nsx "$ns" ip link set "$g" up
+    ns_exists $KVM_MGMT_NS || die "mgmt namespace missing"
+    kvm_tap $KVM_MGMT_NS "$G_MTAP" "" br0
+    nsx $KVM_MGMT_NS ip link set "$G_MTAP" up
+    "$VRCTL" -s "/run/mvr-cn$n/agent.sock" plug "$g" port "$g" >/dev/null || die "plug $g failed"   # 2. plug
+    kvm_keys; kvm_image_layer; kvm_seed "$g"; kvm_boot "$g"                                         # 3. boot
+    kvm_wait_ready "$g" || die "guest $g did not become ready"
+  else
+    ns_exists "mvr-$g" || ip netns add "mvr-$g"
+    nsx "mvr-$g" ip link set lo up
+    nsx "$ns" ip link add "$g" address "$pmac" type veth peer name eth0 address "$G_MAC" netns "mvr-$g"
+    nsx "mvr-$g" sysctl -qw net.ipv6.conf.eth0.disable_ipv6=1 || true
+    no_offload "mvr-$g" eth0
+    no_offload "$ns" "$g"
+    nsx "mvr-$g" ip link set eth0 up
+    nsx "mvr-$g" ip addr replace "$G_ADDR" dev eth0
+    nsx "mvr-$g" ip route replace default via "$G_GW" dev eth0
+    nsx "$ns" sysctl -qw "net.ipv4.conf.$g.arp_ignore=8"
+    nsx "$ns" sysctl -qw "net.ipv6.conf.$g.disable_ipv6=1" || true
+    nsx "$ns" ip link set "$g" up
+    wait_carrier "$ns" "$g"
+    "$VRCTL" -s "/run/mvr-cn$n/agent.sock" plug "$g" port "$g" >/dev/null || die "plug $g failed"
+  fi
+  echo "guest $g started on cn$n"
+}
+
+lab_guest_stop() { # guest
+  need_root
+  ns_exists mvr-ctl || die "ctl lab is not up"
+  local g=${1:?guest} n
+  ctl_bins
+  ctl_guest_info "$g" || die "unknown guest '$g'"
+  local cur; cur=$(ctl_guest_node "$g")
+  n=${cur#cn}; [ -n "$n" ] || n=$G_NODE
+  if [ "$(lab_kind)" = ctl/kvm ]; then
+    ctl_kvm_register "$g" "$n"
+    kvm_stop_guest "$g"                                                    # 1. the guest
+  else
+    ip netns del "mvr-$g" 2>/dev/null || true
+  fi
+  [ -z "$cur" ] || "$VRCTL" -s "/run/mvr-$cur/agent.sock" unplug "$g" >/dev/null || true   # 2. unplug
+  ctl_wait_sync 5 || true                                                  # the port is gone from the forwarder
+  nsx "mvr-cn$n" ip link del "$g" 2>/dev/null || true                      # 3. the TAP / veth
+  echo "guest $g stopped"
+}
+
+lab_guest_move() { # guest node
+  local g=${1:?guest} to=${2:?node}
+  lab_guest_stop "$g"
+  lab_guest_start "$g" "$to"
+}
+
+lab_guest() {
+  local act=${1:-}; shift || true
+  case "$act" in
+    start) lab_guest_start "$@" ;;
+    stop) lab_guest_stop "$@" ;;
+    move) lab_guest_move "$@" ;;
+    *) die "usage: $0 guest start <guest> [node] | stop <guest> | move <guest> <node>" ;;
+  esac
+}

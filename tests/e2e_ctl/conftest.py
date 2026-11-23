@@ -11,9 +11,12 @@ import subprocess
 import time
 from pathlib import Path
 
+import sys
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tests" / "e2e_overlay"))  # capture.py (underlay decoding)
 VARIANT = os.environ.get("MINIVR_LAB_VARIANT", "harness")
 assert VARIANT in ("harness", "kvm")
 LAB = ROOT / "lab" / "lab.sh"
