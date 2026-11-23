@@ -113,10 +113,11 @@ ctl_plug_guests() {
 }
 
 ctl_wait_sync() { # seconds
-  local i n sync
+  local i n sync nodes=("${CTL_NODES[@]}")
+  pid_alive "$LAB_OUT/agent-cn3.pid" && nodes+=(cn3)
   for i in $(seq 1 $(( $1 * 10 ))); do
     sync=1
-    for n in "${CTL_NODES[@]}"; do
+    for n in "${nodes[@]}"; do
       [ "$("$VRCTL" -j -s "/run/mvr-$n/agent.sock" status 2>/dev/null | jq -r '.data.sync // "none"')" = in-sync ] || sync=0
     done
     # in sync as far as the agents know AND the forwarders really hold the intended state
@@ -251,8 +252,9 @@ ctl_guest_node() {
   for n in cn1 cn2 cn3; do
     [ -S "/run/mvr-$n/agent.sock" ] || continue
     "$VRCTL" -j -s "/run/mvr-$n/agent.sock" bindings show 2>/dev/null |
-      jq -e --arg g "$1" '.data.bindings[]? | select(.vmi == $g)' >/dev/null 2>&1 && { echo "$n"; return; }
+      jq -e --arg g "$1" '.data.bindings[]? | select(.vmi == $g)' >/dev/null 2>&1 && { echo "$n"; return 0; }
   done
+  return 0
 }
 
 ctl_kvm_register() { # guest node-number
@@ -353,5 +355,38 @@ lab_guest() {
     stop) lab_guest_stop "$@" ;;
     move) lab_guest_move "$@" ;;
     *) die "usage: $0 guest start <guest> [node] | stop <guest> | move <guest> <node>" ;;
+  esac
+}
+
+# ---- a third compute node joins and leaves at runtime (US5) --------------------------------------
+lab_node() { # up|down cn3
+  need_root
+  ns_exists mvr-ctl || die "ctl lab is not up"
+  [ "${2:-}" = cn3 ] || die "usage: $0 node up|down cn3"
+  ctl_bins
+  case "${1:-}" in
+    up)
+      ns_exists mvr-cn3 || ip netns add mvr-cn3
+      nsx mvr-cn3 ip link set lo up
+      nsx mvr-cn3 sysctl -qw net.ipv4.ip_forward=0
+      underlay_node_link mvr-cn3 4
+      "$ROOT/lab/ctl/ctlnet.sh" node cn3
+      wait_carrier mvr-cn3 u0
+      ctl_start_fwd cn3
+      ctl_start_agent cn3
+      lab_guest_start red4
+      echo "node cn3 up" ;;
+    down)
+      if ns_exists mvr-cn3; then
+        [ -z "$(ctl_guest_node red4)" ] || lab_guest_stop red4 || true
+        ctl_stop_pid "$LAB_OUT/agent-cn3.pid"
+        ctl_stop_pid "$LAB_OUT/minivrd-cn3.pid"
+        [ "$(lab_kind)" = ctl/kvm ] && kvm_stop_guest red4 || true
+        ip netns del mvr-cn3 2>/dev/null || true
+        ip netns exec mvr-ul ip link del ul-cn4 2>/dev/null || true
+        rm -rf /run/mvr-cn3
+      fi
+      echo "node cn3 down" ;;
+    *) die "usage: $0 node up|down cn3" ;;
   esac
 }

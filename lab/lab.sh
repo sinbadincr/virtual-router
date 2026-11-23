@@ -358,6 +358,7 @@ case "${1:-}" in
   snapshot) lab_snapshot ;;
   svc) shift; lab_svc "$@" ;;
   guest) shift; lab_guest "$@" ;;
+  node) shift; lab_node "$@" ;;
   ctl-cut) shift; lab_ctl_cut "$@" ;;
   ctl-diff) lab_ctl_diff ;;
   ssh) shift; lab_ssh "$@" ;;
