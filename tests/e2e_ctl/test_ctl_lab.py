@@ -94,3 +94,12 @@ def test_c3_lifecycle_times_idempotence_and_refusals():
     assert down_s < DOWN_BUDGET_S, f"teardown took {down_s:.0f}s"
     assert host_snapshot() == before, "teardown left the host network changed"
     assert not (LAB_OUT / "ctl").exists()
+
+
+def test_state_file_is_rewritten_after_the_privilege_drop(ctl_lab):
+    """Regression (incident 0003): the controller dropped to a user that could not enter the state
+    directory, so every save after start-up failed and only the initial intent was ever on disk."""
+    text = (LAB_OUT / "ctl" / "state.conf").read_text()
+    assert "bind red1 node cn1 port red1 label 1000" in text, text      # a binding, written after the drop
+    assert "learned node cn1 ip 172.16.0.1" in text                      # a learned address, same
+    assert "cannot write state file" not in (LAB_OUT / "ctld.log").read_text()
