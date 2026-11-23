@@ -1,4 +1,5 @@
 """US1 (specs/005 quickstart C1-C3): the overlay lab driven by controller and agents."""
+import os
 import re
 import time
 
@@ -62,6 +63,15 @@ def test_c1_remote_labels_follow_the_allocation(ctl_lab):
         assert set(labels) == mine and all(l["owner"] == "agent" for l in labels.values())
 
 
+def test_state_file_is_rewritten_after_the_privilege_drop(ctl_lab):
+    """Regression (incident 0003): the controller dropped to a user that could not enter the state
+    directory, so every save after start-up failed and only the initial intent was ever on disk."""
+    text = (LAB_OUT / "ctl" / "state.conf").read_text()
+    assert "bind red1 node cn1 port red1 label 1000" in text, text      # a binding, written after the drop
+    assert "learned node cn1 ip 172.16.0.1" in text                      # a learned address, same
+    assert "cannot write state file" not in (LAB_OUT / "ctld.log").read_text()
+
+
 def test_c3_lifecycle_times_idempotence_and_refusals():
     """SC-001: up + run under the budget, teardown under its budget, snapshot identical."""
     run_lab("down")
@@ -96,10 +106,23 @@ def test_c3_lifecycle_times_idempotence_and_refusals():
     assert not (LAB_OUT / "ctl").exists()
 
 
-def test_state_file_is_rewritten_after_the_privilege_drop(ctl_lab):
-    """Regression (incident 0003): the controller dropped to a user that could not enter the state
-    directory, so every save after start-up failed and only the initial intent was ever on disk."""
-    text = (LAB_OUT / "ctl" / "state.conf").read_text()
-    assert "bind red1 node cn1 port red1 label 1000" in text, text      # a binding, written after the drop
-    assert "learned node cn1 ip 172.16.0.1" in text                      # a learned address, same
-    assert "cannot write state file" not in (LAB_OUT / "ctld.log").read_text()
+def test_controller_refuses_to_start_when_it_cannot_save_its_state(tmp_path):
+    """Incident 0003 follow-up: an unwritable state directory is a start-up error, not a log line."""
+    import subprocess
+    from conftest import BUILD
+    if os.geteuid() != 0:
+        pytest.skip("needs root to drop privileges")
+    sock = tmp_path / "ctld.sock"
+    # build/ lives under a 0700 home: `nobody` cannot enter it
+    state = ROOT / "build" / "lab" / "ctl-probe" / "state.conf"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run([str(ROOT / "build" / BUILD / "minivr-ctld"), "--state", str(state), "--init",
+                            str(ROOT / "lab" / "ctl" / "intent.conf"), "--listen", "127.0.0.1:17999",
+                            "--sock", str(sock), "--user", "nobody"], capture_output=True, text=True, timeout=20)
+    finally:
+        for f in state.parent.glob("*"):
+            f.unlink()
+        state.parent.rmdir()
+    assert r.returncode == 1, (r.returncode, r.stderr)
+    assert "cannot write the state file" in r.stderr, r.stderr

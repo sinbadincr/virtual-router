@@ -139,7 +139,8 @@ struct cg_node_info {
 };
 
 struct cg_stats {
-    uint64_t sessions_accepted, sessions_rejected, updates_sent, entries_sent, ack_errors, state_writes;
+    uint64_t sessions_accepted, sessions_rejected, updates_sent, entries_sent, ack_errors, state_writes,
+        state_write_errors; /* saves that failed: the next restart would lose labels */
     uint64_t proto_err[24];
     uint64_t reject[16]; /* indexed by ERR_CODE */
 };

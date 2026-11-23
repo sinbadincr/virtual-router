@@ -39,6 +39,7 @@ The state file uses the same grammar as the CLI plus three state-only lines (`bi
 `learned`). It is rewritten as temp file + `fsync` + `rename` + `fsync` of the directory, **before**
 the updates it justifies are sent. A missing, empty or unparsable state file is a start-up error
 with a line number, never "start empty": silently forgetting every label would renumber the fabric.
+A save that fails is counted (`state_write_errors` in `stats show`), and start-up refuses to proceed if the unprivileged user cannot write the state file (incident 0003).
 `learned` keeps each node's underlay address so that a controller restart does not withdraw routes
 to nodes that have not yet reconnected.
 

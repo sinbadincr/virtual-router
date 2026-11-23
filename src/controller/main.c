@@ -31,9 +31,10 @@ uint64_t ctl_now_s(void) {
 void ctl_commit(void) {
     ctl_now_s();
     if (g_ctl.m.gen != g_ctl.saved_gen) {
-        if (store_save(&g_ctl.m, g_ctl.state_path) != 0)
+        if (store_save(&g_ctl.m, g_ctl.state_path) != 0) {
+            g_ctl.stats.state_write_errors++;
             log_error("ctl", "cannot write state file", "path=%s errno=%d", g_ctl.state_path, errno);
-        else
+        } else
             g_ctl.stats.state_writes++;
         g_ctl.saved_gen = g_ctl.m.gen;
     }
@@ -41,6 +42,8 @@ void ctl_commit(void) {
     if (g_ctl.m.gen != g_ctl.saved_gen) { /* releases on ACK changed the state file content */
         if (store_save(&g_ctl.m, g_ctl.state_path) == 0)
             g_ctl.stats.state_writes++;
+        else
+            g_ctl.stats.state_write_errors++;
         g_ctl.saved_gen = g_ctl.m.gen;
     }
 }
@@ -153,6 +156,14 @@ int main(int argc, char **argv) {
     if (privdrop(user) != 0)
         return 1;
 
+    /* the state file is rewritten for the whole life of the process, as the unprivileged user:
+     * prove now that this works, not at the first restart that needs the file (incident 0003) */
+    if (store_save(&g_ctl.m, g_ctl.state_path) != 0) {
+        fprintf(stderr, "minivr-ctld: cannot write the state file %s as uid %u after dropping privileges: %s\n"
+                        "  (the user must be able to reach and write its directory; see --user)\n",
+                state, (unsigned)getuid(), strerror(errno));
+        return 1;
+    }
     log_info("main", "controller started", "state=%s listen=%s sock=%s tenants_nodes=%d", state,
              listen_addr, sock, 0);
     while (!stop) {

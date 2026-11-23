@@ -6,7 +6,7 @@
 | Kind | **Real defect** found while writing the failure tests (phase 3, US3) |
 | Severity | medium: a controller restart briefly withdrew routes (about 3% ping loss); no data loss in the lab |
 | Build | `debug` preset, `minivr-ctld`, harness lab (`lab/lab.sh up --harness --topo ctl`) |
-| Status | closed (lab fix); follow-ups below are **not** done |
+| Status | closed (lab fix, error counter, start-up check); one limitation listed below |
 | Regression test | `tests/e2e_ctl/test_ctl_lab.py::test_state_file_is_rewritten_after_the_privilege_drop` |
 
 ## Symptom
@@ -61,15 +61,17 @@ With the fix (`SUDO_USER` set, as under `sudo` from your own account) the first 
 second is 5. The regression test asserts the file content and the absence of the log line, and was
 run both ways: it fails with `nobody` and passes with the invoking user.
 
-## Lessons and follow-ups (not implemented)
+## Lessons and follow-ups (implemented afterwards)
 
-- **A failed save must not be silent.** `ctl_commit()` logs and continues; a controller that cannot
-  persist is a controller whose next restart loses labels. Candidates: count failures in
-  `stats show` (`state_write_errors`), show a persistent warning in `node show`, or refuse
-  changes that cannot be saved.
-- **Check writability at start-up, after the drop.** A one-line probe (create and remove a temp file
-  in the state directory) would have turned this into a start-up error with the path in the message,
-  as the constitution asks for the other start-up checks.
+- **A failed save is counted.** `stats show` has `state_write_errors` next to `state_writes`, so a
+  controller that cannot persist is visible without reading its log
+  (`test_ctl_grammar.c::json_shapes`).
+- **The start-up check runs after the drop.** `minivr-ctld` now saves its state once more as the
+  unprivileged user before entering the loop and exits 1 with "cannot write the state file … after
+  dropping privileges" (`test_controller_refuses_to_start_when_it_cannot_save_its_state`, which runs the
+  real binary against a directory `nobody` cannot reach).
+- Still open: a change whose save fails is applied in memory and sent to the nodes anyway (the counter
+  is the only signal after start-up); refusing such changes would need the model to be rolled back.
 - The label-withdrawal on restart was a second, smaller design flaw that this defect exposed: a
   controller that knows a node's VMIs but not yet its underlay address omits the routes. Persisting
   `learned node …` (done, see `docs/controller.md`) removes it for restarts; an unreachable node still

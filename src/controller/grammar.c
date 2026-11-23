@@ -509,6 +509,7 @@ static int c_stats_show(struct ctx *c, int argc, char **argv) {
     jw_u64(w, "entries_sent", st.entries_sent);
     jw_u64(w, "ack_errors", st.ack_errors);
     jw_u64(w, "state_writes", st.state_writes);
+    jw_u64(w, "state_write_errors", st.state_write_errors);
     proto_errors_json(w, "proto_errors", st.proto_err);
     return 0;
 }

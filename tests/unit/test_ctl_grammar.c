@@ -225,6 +225,7 @@ TEST(json_shapes) {
     CHECK(cg_exec(&cf_m, "stats show", CG_CLI, &OPS, &w, &cf_err) == 0);
     CHECK(strstr(cf_out, "\"sessions\":{\"accepted\":3,\"rejected\":0,\"rejected_by_reason\":{"));
     CHECK(strstr(cf_out, "\"unknown-node\":1"));
+    CHECK(strstr(cf_out, "\"state_write_errors\":0"));
     CHECK(strstr(cf_out, "\"updates_sent\":0") && strstr(cf_out, "\"truncated\":4"));
     jw_init(&w, cf_out, sizeof cf_out);
     CHECK(cg_exec(&cf_m, "version", CG_CLI, &OPS, &w, &cf_err) == 0);
