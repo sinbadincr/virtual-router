@@ -46,7 +46,7 @@ Address syntax: IPv4 dotted quad; prefix `a.b.c.d/len` (host bits must be zero);
 | `neigh show [vrf <vrf> \| underlay] [offset <n>] [limit <n>]` | CLI | vrf, ip, mac, port, kind (`static`/`learned`), state, held packets; all tables unless one is named; paged like `route show` |
 | `neigh add <ip> lladdr <mac> dev <port>` | config, CLI | static neighbour; also installs the `/32` host route and binds the port to that VM (anti-spoofing) |
 | `neigh del <ip> [vrf <vrf>]` | CLI | delete a neighbour (and its host route and binding) from that VRF's table |
-| `stats show` | CLI | per-port counters, every drop reason (30), event counters, per-node tunnel counters, mbuf gauge |
+| `stats show` | CLI | per-port counters, every drop reason (31), event counters, per-node tunnel counters, mbuf gauge |
 | `stats clear` | CLI | zero all counters (gauges are untouched) |
 | `version` | CLI | protocol, version, build type, uptime |
 | `debug crash` | CLI, debug builds | deliberate NULL dereference, for the crash drill |
@@ -161,7 +161,7 @@ Mutating commands return `"data": {}`.
 {"ok": true, "data": {"protocol": 1, "version": "0.1.0", "build": "debug", "uptime_s": 12}}
 ```
 
-Every one of the 30 drop reasons is always present in `reasons` (zero if unused; the example abbreviates it),
+Every one of the 31 drop reasons is always present in `reasons` (zero if unused; the example abbreviates it),
 so `sum(reasons) == total` can be asserted. `mac` in `neigh show` is `null` while a neighbour is
 still `INCOMPLETE`. `node.state` is `unresolved`, `resolving`, `reachable` or `failed` (the underlay
 neighbour entry of the node); `nodes` in `stats show` ends with the pseudo-node `unknown`, which
@@ -183,3 +183,19 @@ PREFIX          PORT  GATEWAY     ORIGIN
 10.0.2.0/24     p3    -           connected
 10.0.9.0/24     p3    10.0.2.13   static
 ```
+
+## Phase 3 additions
+
+**Forwarder.** `port add <p> ifname <if> ip <a/len> [vrf <v>] fd` (agent session only, the socket
+travels with the request) and `port del <p>` create and remove a port at runtime (`busy` while a
+static route uses it, `immutable` for the underlay, `not-owner` from the agent for a port it did not
+create). `session agent` marks a connection as the agent's (one at a time, else `busy`),
+`session show` lists connections. Every `show` carries `owner` (`config`, `cli` or `agent`); tables get
+an `OWNER` column once any entry is not owned by `config`. `del`/`replace`/`set` of a non-agent entry
+on the agent session fail with `not-owner`; `bad-fd` is the new error for a refused descriptor.
+`version` adds `daemon` and a 16-hex `boot_id`. The default page size of the paged shows is now 400.
+
+**Controller** (`vrctl -s /run/mvr-ctl/ctld.sock …`): `tenant add|set|del|show`, `subnet add|del`,
+`node add|del|forget|show|state`, `vmi add|del|show`, `stats show`, `version`; grammar and errors in
+`specs/005-agent-controller/contracts/controller-cli.md`. **Agent** (`-s /run/mvr-cnN/agent.sock`):
+`plug <vmi> port <p>`, `unplug <vmi>`, `status`, `bindings show`, `want show`, `diff show`, `version`.

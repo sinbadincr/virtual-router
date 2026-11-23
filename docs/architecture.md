@@ -178,3 +178,24 @@ the VNI names the VRF and the inner Ethernet header carries the *router* MAC of 
 because there is no L2 segment to learn from. The router MAC of a node is its underlay port's MAC,
 so there is no extra address to invent and the Linux kernel's VXLAN device interoperates with a
 static FDB and permanent neighbour entries (`lab/overlay/interop.sh`).
+
+## Phase 3: three processes and the control network
+
+```
+ mvr-ctl           mvr-cnN (one per compute node)
+ minivr-ctld ──TCP── minivr-agent ──unix socket (+SCM_RIGHTS)── minivrd ── guests
+ (intent, bindings,   (want/pending/have,                        (forwarding; unchanged
+  compute, state)      reconcile, plug)                           apart from owner and ports)
+```
+
+- **`minivrd` is still the only thing on the packet path.** It gained an `owner` on every entry
+  (`config` file, `cli`, `agent`), a connection *role* (`session agent`) and runtime ports: the
+  agent opens the AF_PACKET socket and passes it over the control socket, so the forwarder keeps
+  zero capabilities (`docs/agent.md`). `port del` removes a port with its connected/host routes,
+  neighbours (held packets counted as `port_deleted`) and labels, between bursts, like every change.
+- **Two libraries**: `libminivr_dp` (syscall-free forwarding) and `libminivr_ctrl` (syscall-free
+  protocol codec, node-state sets, controller model/compute/grammar, agent reconcile); the I/O around
+  them (`session.c`, `store.c`, `fwd.c`, `main.c`) is thin. `scripts/check-fastpath.sh` audits both.
+- **Control network** (`mvr-ctl`) is separate from the underlay so control traffic never races the
+  forwarder's ownership of `u0`; see `docs/lab.md`.
+- Design notes: [protocol](protocol.md), [controller](controller.md), [agent](agent.md).

@@ -36,6 +36,8 @@ sudo make lab-clean                                # leaves the host network exa
 
 # phase 2: two compute nodes, tenants with overlapping addresses, MPLSoUDP and VXLAN tunnels
 sudo make lab TOPO=overlay && sudo make lab-run
+# phase 3: the same overlay lab programmed by a controller and per-node agents
+sudo make lab TOPO=ctl && sudo make lab-run
 sudo lab/lab.sh ssh red1 ping -c3 10.1.1.12        # red1 on cn1 -> red2 on cn2 through MPLSoUDP, ttl=63
 sudo lab/lab.sh ssh blue1 ping -c3 10.1.1.12       # same address, other tenant, through VXLAN
 ```
@@ -76,6 +78,7 @@ not line rate.
 | `docs/architecture.md` | event loop, packet path, data structures, mbuf lifecycle |
 | `docs/lab.md` | topology, addressing, commands, safety guarantees, the test harness, the overlay lab |
 | `docs/overlay.md` | phase 2: packet walk of both tunnels with real captures, comparison with Tungsten Fabric and the Linux kernel |
+| `docs/protocol.md`, `docs/controller.md`, `docs/agent.md` | phase 3: the agent⇄controller wire protocol, the controller (model, compute-then-diff, labels, state file) and the agent (reconcile, headless operation, fd passing), compared with Tungsten Fabric |
 | `docs/kvm.md` | the KVM guests: prerequisites, wiring, images, troubleshooting |
 | `docs/cli.md` | every `vrctl` command, exit code, error code and JSON shape |
 | `docs/drop-reasons.md` | every named drop reason, its trigger and its test |
@@ -86,10 +89,10 @@ not line rate.
 
 ## Layout
 
-`src/dp` forwarding logic (no syscalls), `src/pio` packet I/O backends, `src/ctl` command grammar
+`src/dp` forwarding logic (no syscalls), `src/proto` + `src/controller` + `src/agent` the phase 3 control plane (`libminivr_ctrl` is pure), `src/pio` packet I/O backends, `src/ctl` command grammar
 and control socket, `src/daemon` the `minivrd` main/loop/privileges/crash/link monitor,
 `src/vrctl` the CLI, `lab/` lab scripts and shipped configs, `tests/unit` C unit tests,
-`tests/e2e` pytest + scapy harness suite, `tests/e2e_kvm` KVM suite, `tests/e2e_overlay` the phase 2 suite (both variants). Third-party test dependencies: `THIRD_PARTY.md`.
+`tests/e2e` pytest + scapy harness suite, `tests/e2e_kvm` KVM suite, `tests/e2e_overlay` the phase 2 suite (both variants), `tests/e2e_ctl` the phase 3 suite. Third-party test dependencies: `THIRD_PARTY.md`.
 
 ## Roadmap
 
@@ -98,12 +101,12 @@ and control socket, `src/daemon` the `minivrd` main/loop/privileges/crash/link m
 | 1. Lab + L3 forwarder | Namespace lab (`mvr-cn1` + 3 VM namespaces, now the test harness); AF_PACKET/epoll forwarder with proxy ARP, anycast gateway, LPM trie, neighbour FSM, ICMP rate limit, anti-spoofing; `vrctl` CLI; privilege drop; crash dumps and post-mortem | **Done** |
 | 1.5. KVM lab | Real KVM guests (CirrOS, virtio-net) attached to `minivrd` through TAP ports, as nova/libvirt attach VMs to a vRouter; no forwarder changes; since feature 004 it is the default lab (`make lab`), the namespace VMs stay as the test harness (`lab.sh up --harness`); see [docs/kvm.md](docs/kvm.md) | **Done** |
 | 2. VRFs + overlay tunnels | Two compute nodes over an emulated underlay; tenants with overlapping addresses; MPLSoUDP (RFC 7510) and VXLAN (RFC 7348); interop with the Linux kernel VXLAN; see [docs/overlay.md](docs/overlay.md) | **Implemented** (see `specs/003-vrf-overlay-tunnels/tasks.md`) |
-| 3. Agent + controller | Controller holding network state; per-node agent programming `minivrd` over a documented protocol, replacing static remote routes | Planned |
+| 3. Agent + controller | Controller `minivr-ctld` holding tenants, VM interfaces and bindings; per-node `minivr-agent` programming `minivrd` over a documented binary protocol, fd passing for runtime ports, headless operation; the overlay lab driven from `make lab TOPO=ctl`; see [docs/controller.md](docs/controller.md), [docs/agent.md](docs/agent.md), [docs/protocol.md](docs/protocol.md) | **Implemented** (see `specs/005-agent-controller/tasks.md`) |
 | 4. Multi-core + DPDK + perf | Worker threads with RCU-updated tables, DIR-24-8 LPM; optional DPDK backend on virtual devices and vhost-user for KVM guests; benchmarks, perf and flame graphs in `docs/perf.md` | Planned |
 | 5. BGP EVPN + incidents | EVPN peering with FRR (type-5/type-2 routes); post-mortems of deliberately reproduced faults (races, use-after-free, deadlocks) | Planned |
 
 ## Status
 
-Phases 1, 1.5 and 2 (single-node lab, L3 forwarder, VRFs and overlay tunnels). Not claimed:
-performance (see Benchmarks), multi-core, a controller (routes and receive mappings are static),
-IPv6, VLANs, ARP/neighbour aging, tunnel authentication or encryption. See the specs' assumptions.
+Phases 1, 1.5, 2 and 3 (single-node lab, L3 forwarder, VRFs and overlay tunnels, controller and
+agents). Not claimed: performance (see Benchmarks), multi-core, controller redundancy, protocol
+authentication or encryption, IPv6, VLANs, ARP/neighbour aging, tunnel authentication or encryption. See the specs' assumptions.

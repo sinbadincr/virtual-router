@@ -233,3 +233,53 @@ phase 1.5.
 
 **Not covered by an automated check:** `tshark` decoding (the SC-007 decoder is scapy's MPLS and
 VXLAN layers, a standard third-party dissector; tshark is not installed on the development host).
+
+## Phase 3: agent and controller (`specs/005-agent-controller/spec.md`)
+
+Unit tests are in `tests/unit/` (ctest, also under ASan/UBSan); the end-to-end suite is
+`tests/e2e_ctl/` (both lab variants, `make e2e` / `make e2e-kvm`), and the phase 2 overlay suite is
+re-run on the controller lab with `MINIVR_OVERLAY_TOPO=ctl`. "C<n>" is a scenario of
+`specs/005-agent-controller/quickstart.md`. Test names are abbreviated.
+
+| FR | Requirement (short) | Covered by |
+|---|---|---|
+| FR-001 | one command builds the controller lab | `test_ctl_lab::test_c3_*`, `lab/lab.sh up --topo ctl` (C1, C3) |
+| FR-002 | bootstrap configs only | `test_ctl_lab::test_c1_bootstrap_*`, `test_config.c::ctl_bootstrap_configs_*` |
+| FR-003 | separate control network | `lab/ctl/ctlnet.sh`, `test_ctl_lab::test_c1_every_node_*` |
+| FR-004 | third node joins/leaves at runtime | `test_node_join::test_c13_*` |
+| FR-005, FR-005a | intent and port bindings; one binding per VMI | `test_ctl_grammar.c`, `test_alloc.c::bind_errors`, `test_vm_lifecycle::test_c7_*` |
+| FR-006 | per-node labels, quarantine | `test_alloc.c` (all cases), `test_ctl_lab::test_c1_remote_labels_*` |
+| FR-007 | node state computed from intent + bindings | `test_compute.c` (isolation, locality, determinism) |
+| FR-008 | changes reach nodes within 2 s | `test_vm_lifecycle::test_c5_*`, `test_c6_*` |
+| FR-009, FR-010 | persisted state; one grammar for file, state and CLI | `test_store.c`, `test_ctl_grammar.c`, `test_failures::test_c9_*` |
+| FR-011, FR-011a | capacities; exactly one controller, headless agents | `test_ctl_grammar.c::capacities`, `test_alloc.c::at_most_sixteen_*`, `test_failures::test_c9_*` |
+| FR-012, FR-012a | one agent per node; plug/unplug interface | `test_vm_lifecycle`, `lab.sh guest start/stop/move`, `test_inspect::test_unknown_vmi_*` |
+| FR-013 | the agent only uses the forwarder's control socket | `src/agent/fwd.c`; `test_owner.c` (session, owner, runtime ports) |
+| FR-014 | agent-owned entries, never overwrite others | `test_owner.c::agent_cannot_change_foreign_entries_*`, `test_reconcile.c::keys_owned_by_*`, `test_inspect::test_conflicting_*` |
+| FR-015 | reconcile, not replay; sweep after a complete sync | `test_reconcile.c` (order, pending, adopted state), `test_failures::test_c10_*` |
+| FR-016 | headless operation, backoff | `test_failures::test_c9_*`, `test_c12_*`, `test_reconcile.c::backoff_*` |
+| FR-017 | agent restart keeps traffic; forwarder restart detected | `test_failures::test_c10_*`, `test_c11_*` (`boot_id`) |
+| FR-018 | entry-by-entry application | `test_proto_corpus::test_b_*`, `test_proto.c::entry_level_errors_*` |
+| FR-019, FR-020 | protocol documented; bind reports | `docs/protocol.md`, `test_proto.c`, `test_fakepeer_codec.py` |
+| FR-021 | dead peer detected ≤ 10 s | `test_proto_corpus::test_a_ten_seconds_of_silence_*`, `test_inspect::test_control_network_cut_*` |
+| FR-022 | bounds-checked decoders, reasons counted | `test_proto.c` (every malformed example), `test_netio.c`, `test_proto_corpus::test_a_*` |
+| FR-023 | trusted control network, gaps documented | `docs/protocol.md` "Security" |
+| FR-024, FR-025 | controller and agent views | `test_inspect::test_every_documented_field_*`, `test_ctl_grammar.c::json_shapes` |
+| FR-026 | rate-limited structured logs | `src/controller/session.c`, `src/agent/*.c` (`log_*`), `docs/controller.md` |
+| FR-027 | codec tests with vectors | `test_proto.c`, `test_nodestate.c`, `test_fakepeer_codec.py` |
+| FR-028 | phase 2 checks pass unchanged on the controller lab | `MINIVR_OVERLAY_TOPO=ctl pytest tests/e2e_overlay` (C2; tests that rewrite tables by hand are skipped there) |
+| FR-029 | each failure of US3 covered | `test_failures.py` (C9–C12), `test_churn.py` (C17) |
+| FR-030 | one command runs phases 1–3 | `tests/e2e/run.sh` (`make e2e`, `make e2e-kvm`) |
+
+| SC | Criterion (short) | Covered by |
+|---|---|---|
+| SC-001 | lab up+run < 150 s KVM / < 15 s harness, teardown within budget | `test_ctl_lab::test_c3_*` (asserted) |
+| SC-002 | phase 2 checks pass on the controller lab | `MINIVR_OVERLAY_TOPO=ctl` run (C2) |
+| SC-003 | plug → reachable ≤ 2 s over 20 trials | `test_vm_lifecycle::test_c5_*` (max 0.14 s harness) |
+| SC-004 | controller down 60 s: zero loss | `test_failures::test_c9_*` |
+| SC-005 | intent == forwarders after failures and churn | `lab.sh ctl-diff` after every case; `test_churn::test_c17_*` |
+| SC-006 | malformed corpus rejected under named reasons | `test_proto_corpus.py`, `test_proto.c` |
+| SC-007 | cn3 joins, reachable ≤ 10 s | `test_node_join::test_c13_*` |
+| SC-008 | no cross-tenant state or frames | `test_compute.c::isolation_*`, `test_churn::test_c17_*` (capture in the guests) |
+| SC-009 | one command verifies phases 1–3 | `tests/e2e/run.sh`; measured time in `specs/005-agent-controller/quickstart.md` "Results" |
+| SC-010 | seeded faults located from the views | `test_inspect.py` (C15) |

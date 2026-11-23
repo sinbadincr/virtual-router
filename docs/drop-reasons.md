@@ -1,6 +1,6 @@
 # Drop reasons
 
-30 reasons: the 21 of phase 1 below and the 9 tunnel reasons of phase 2.
+31 reasons: the 21 of phase 1 below, the 9 tunnel reasons of phase 2 and `port_deleted` of phase 3.
 
 Every packet `minivrd` discards increments exactly one named reason counter, and
 `total == sum(reasons)` always holds (`vrctl -j stats show`, `.data.drops`). The counter is
@@ -33,6 +33,7 @@ TTL → route → egress state → MTU → neighbour. The first failing check na
 | `ttl_exceeded` | TTL ≤ 1 on a packet that must be forwarded | type 11 code 0 | `test_forward`, `test_forwarding.py::v6` |
 | `mtu_exceeded` | IP length > egress MTU (never fragmented) | type 3 code 4 with the MTU, only if DF is set | `test_forward` |
 | `neighbour_unresolved` | hold queue full (3), entry `FAILED`, or the 1 s resolution deadline passed (held packets) | type 3 code 1 when an entry fails; none when the hold queue is full | `test_neigh`, `test_forwarding.py::v16` |
+| `port_deleted` | the port was deleted (runtime `port del`) while packets were held on its neighbours | none | `test_owner::port_del_cascades`, `test_stats` |
 | `port_down` | egress port admin- or oper-down, or its port went down while packets were held | none | `test_forward`, `test_neigh`, `test_robustness.py` |
 | `local_unsupported` | addressed to a forwarder address and not an ICMP echo request | none | `test_forward` |
 | `nobuf` | mbuf pool (4,096) exhausted on receive | none | AF_PACKET backend; drained so the socket cannot stay readable |

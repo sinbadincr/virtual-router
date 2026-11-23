@@ -131,3 +131,32 @@ The **injector** `mvr-inj` (172.16.0.9, MAC `02:00:00:ff:00:09`) sends crafted u
 for the malformed-packet corpus (`tests/e2e_overlay/underlay_corpus.py`). The overlay suite is
 `tests/e2e_overlay`, run on both variants by `sudo make e2e` (namespace VMs) and
 `sudo make e2e-kvm` (KVM guests).
+
+## The controller lab (phase 3, `TOPO=ctl`)
+
+`sudo make lab TOPO=ctl && sudo make lab-run` brings up the overlay lab plus a control network and
+starts the controller and one agent per node; the forwarders get only their bootstrap config
+(`lab/ctl/cnN.conf`: the underlay port and the ICMP limiter). Everything else — VRFs, ports, routes,
+labels, VNIs — is derived from `lab/ctl/intent.conf` and the guests' plugs.
+
+```
+            mvr-ctl: br0 10.98.0.254/24   (minivr-ctld :7700, /run/mvr-ctl/ctld.sock)
+        ┌──────────────┬──────────────┬──────────────┐
+   mvr-cn1 c0     mvr-cn2 c0     mvr-cn3 c0 (node up cn3)
+   10.98.0.1      10.98.0.2      10.98.0.3            ── u0 on mvr-ul as in the overlay lab
+```
+
+`c0` is an ordinary kernel interface (ARP, MTU 1500); the forwarder never opens it, so control traffic
+does not depend on the data path. Spare guests: `red5` (cn2, 10.1.2.15) and `red4` (cn3, 10.1.1.14).
+
+| Command | Effect |
+|---|---|
+| `sudo lab/lab.sh guest start\|stop <g> [node]` | create the TAP/veth, `plug` through the node's agent, boot the guest — and the reverse |
+| `sudo lab/lab.sh guest move <g> <node>` | `stop`, then `start` on the other node (same MAC and address) |
+| `sudo lab/lab.sh node up\|down cn3` | add or remove the third compute node with its guest red4 |
+| `sudo lab/lab.sh svc stop\|start\|kill\|pause\|resume ctld\|agent-cnN\|minivrd-cnN` | failure injection |
+| `sudo lab/lab.sh ctl-cut <node> up\|down` | cut or restore the node's control link |
+| `sudo lab/lab.sh ctl-diff` | controller intent vs agent-owned forwarder entries, exit 0 only if equal |
+
+Sockets: `/run/mvr-ctl/ctld.sock`, `/run/mvr-cnN/agent.sock`, `/run/mvr-cnN/minivr.sock`; state in
+`build/lab/ctl/state.conf`; logs `build/lab/{ctld,agent-cnN,minivrd-cnN}.log`.

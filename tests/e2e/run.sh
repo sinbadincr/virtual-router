@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command end-to-end verification (US5, extended by phase 2 US7): prerequisites -> build -> venv ->
-# pytest -> cleanup. Runs the phase 1 suite (unchanged) and then the overlay suite on the same
-# lab variant: harness (no KVM) for `make e2e`, KVM guests for `make e2e-kvm`.
+# pytest -> cleanup. Runs the phase 1 suite (unchanged), the overlay suite and the phase 3
+# controller suite (plus the overlay suite on the controller-driven lab) on the same lab variant: harness (no KVM) for `make e2e`, KVM guests for `make e2e-kvm`.
 # Prints PASS/FAIL/SKIP per check, always tears the lab down, keeps artifacts on failure.
 set -u
 cd "$(dirname "$0")/../.."
@@ -34,10 +34,12 @@ if [ $KVM -eq 1 ]; then
     esac
     SUITE=tests/e2e_kvm REPORT="$OUT/report-kvm.xml" NAME="e2e-kvm"
     OVERLAY_REPORT="$OUT/report-overlay-kvm.xml" VARIANT=kvm
+    CTL_REPORT="$OUT/report-ctl-kvm.xml" OVCTL_REPORT="$OUT/report-overlay-ctl-kvm.xml"
     export MINIVR_E2E_BUDGET_S="${MINIVR_E2E_BUDGET_S:-300}"
 else
     SUITE=tests/e2e REPORT="$OUT/report.xml" NAME="e2e"
     OVERLAY_REPORT="$OUT/report-overlay.xml" VARIANT=harness
+    CTL_REPORT="$OUT/report-ctl.xml" OVCTL_REPORT="$OUT/report-overlay-ctl.xml"
 fi
 
 mkdir -p "$OUT"
@@ -61,7 +63,7 @@ if [ ! -x .venv/bin/pytest ]; then
 fi
 
 cleanup
-rm -f "$REPORT" "$OVERLAY_REPORT"
+rm -f "$REPORT" "$OVERLAY_REPORT" "$CTL_REPORT" "$OVCTL_REPORT"
 .venv/bin/pytest -v --junitxml="$REPORT" -o junit_family=xunit2 "$SUITE"
 rc=$?
 # phase 2: the overlay suite on the same variant; the lab of the first suite is torn down first
@@ -69,11 +71,21 @@ cleanup
 MINIVR_LAB_VARIANT=$VARIANT .venv/bin/pytest -v --junitxml="$OVERLAY_REPORT" -o junit_family=xunit2 tests/e2e_overlay
 rc2=$?
 [ $rc -ne 0 ] || rc=$rc2
+# phase 3: controller, agents and the failure/churn/corpus suites, then the phase 2 tunnel and
+# isolation tests again on the controller-driven lab (FR-028)
+cleanup
+MINIVR_LAB_VARIANT=$VARIANT .venv/bin/pytest -v --junitxml="$CTL_REPORT" -o junit_family=xunit2 tests/e2e_ctl
+rc3=$?
+[ $rc -ne 0 ] || rc=$rc3
+cleanup
+MINIVR_OVERLAY_TOPO=ctl MINIVR_LAB_VARIANT=$VARIANT .venv/bin/pytest -v --junitxml="$OVCTL_REPORT" -o junit_family=xunit2 tests/e2e_overlay
+rc4=$?
+[ $rc -ne 0 ] || rc=$rc4
 
 echo
-.venv/bin/python - "$REPORT" "$OVERLAY_REPORT" <<'PY'
+.venv/bin/python - "$REPORT" "$OVERLAY_REPORT" "$CTL_REPORT" "$OVCTL_REPORT" <<'PY'
 import sys, xml.etree.ElementTree as ET
-for path, prefix in ((sys.argv[1], ""), (sys.argv[2], "overlay/")):
+for path, prefix in ((sys.argv[1], ""), (sys.argv[2], "overlay/"), (sys.argv[3], "ctl/"), (sys.argv[4], "overlay-on-ctl/")):
     try:
         root = ET.parse(path).getroot()
     except (OSError, ET.ParseError) as e:
