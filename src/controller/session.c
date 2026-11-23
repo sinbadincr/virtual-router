@@ -297,6 +297,8 @@ struct rx {
 };
 
 static void add_ack_err(struct rx *r, unsigned code, const char *vmi, const char *text) {
+    if (code < 16)
+        g_ctl.stats.reject[code]++; /* counted by reason in `stats show` */
     if (r->nack >= MAX_ERRS)
         return;
     struct perror *e = &r->ack_errs[r->nack++];

@@ -308,6 +308,36 @@ static void render_table(const char *cmd, const struct jnode *d) {
                    ins && ins->b ? "yes" : "no", uval(r, "entries"), uval(se, "since"),
                    sval(se, "last_error", "-"));
         }
+    } else if (strcmp(cmd, "status") == 0 && strcmp(g_daemon, "minivr-agent") == 0) {
+        const struct jnode *se = json_get(d, "session"), *fw = json_get(d, "forwarder");
+        printf("node %s  sync %s  gen %llu\n", sval(d, "node", "?"), sval(d, "sync", "?"), uval(d, "gen"));
+        printf("controller %s  session %s  since %llus  last_error %s\n", sval(se, "controller", "?"),
+               sval(se, "state", "?"), uval(se, "since"), sval(se, "last_error", "-"));
+        printf("forwarder %s  boot_id %s  last_error %s\n", sval(fw, "state", "?"), sval(fw, "boot_id", "?"),
+               sval(fw, "last_error", "-"));
+        printf("\n%-8s%6s%6s\n", "KIND", "WANT", "HAVE");
+        const struct jnode *en = json_get(d, "entries");
+        for (const struct jnode *r = en ? en->child : NULL; r; r = r->next)
+            printf("%-8s%6llu%6llu\n", r->key ? r->key : "?", uval(r, "want"), uval(r, "have"));
+        const struct jnode *fl = json_get(d, "failed");
+        for (const struct jnode *r = fl ? fl->child : NULL; r; r = r->next)
+            printf("FAILED %s: %s: %s\n", sval(r, "command", "?"), sval(r, "code", "?"), sval(r, "message", ""));
+        const struct jnode *be = json_get(d, "bind_errors");
+        for (const struct jnode *r = be ? be->child : NULL; r; r = r->next)
+            printf("BIND ERROR %s: %s: %s\n", sval(r, "vmi", "?"), sval(r, "code", "?"), sval(r, "message", ""));
+    } else if (strcmp(cmd, "diff show") == 0) {
+        static const char *const sec[] = {"missing", "stale", "conflicts"};
+        int total = 0;
+        for (int i = 0; i < 3; i++) {
+            const struct jnode *l = json_get(d, sec[i]);
+            for (const struct jnode *r = l ? l->child : NULL; r; r = r->next) {
+                printf("%-10s%-6s%s%s%s\n", sec[i], sval(r, "kind", "?"), sval(r, "name", sval(r, "prefix", "")),
+                       json_get(r, "owner") ? "  owner " : "", sval(r, "owner", ""));
+                total++;
+            }
+        }
+        if (!total)
+            puts("converged: nothing missing, stale or in conflict");
     } else if (strcmp(cmd, "vmi show") == 0) {
         printf("%-10s%-8s%-16s%-19s%-9s%-8s%-10s%s\n", "VMI", "TENANT", "IP", "MAC", "STATE", "NODE",
                "PORT", "LABEL");

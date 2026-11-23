@@ -158,6 +158,7 @@ int cg_exec(struct cmodel *m, const char *line, enum cg_where where, const struc
             struct jw *out, struct cmd_err *err);
 /* One entry as JSON (shared with the agent's `want show`). */
 void ne_json(struct jw *w, const struct nentry *e);
+void ne_json_ex(struct jw *w, const struct nentry *e, const char *owner); /* + "owner" when set */
 /* Serialise intent + bindings + quarantine in the grammar (the state file). Writes into buf;
  * returns the length or -1 if cap is too small. */
 int cm_serialize(const struct cmodel *m, char *buf, size_t cap);

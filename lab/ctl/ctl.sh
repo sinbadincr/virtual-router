@@ -45,11 +45,14 @@ ctl_start_ctld() {
   ctl_bins
   ctl_stop_pid "$LAB_OUT/ctld.pid"
   mkdir -p "$LAB_OUT/ctl"
-  install -d -m 0700 -o nobody "$LAB_OUT/ctl"
+  # the controller drops privileges to the invoking user, who can reach build/lab/ctl (nobody
+  # cannot traverse a 0700 home directory, so it could never rewrite the state file there)
+  CTL_USER=${SUDO_USER:-nobody}
+  install -d -m 0700 -o "$CTL_USER" "$LAB_OUT/ctl"
   install -d -m 0700 -o root "$CTL_RUN"
   rm -f "$CTL_SOCK"
   setsid ip netns exec mvr-ctl "$CTLD_BIN" --state "$LAB_OUT/ctl/state.conf" --init "$ROOT/lab/ctl/intent.conf" \
-      --listen "$CTL_ADDR" --sock "$CTL_SOCK" >>"$LAB_OUT/ctld.log" 2>&1 </dev/null &
+      --listen "$CTL_ADDR" --sock "$CTL_SOCK" --user "$CTL_USER" >>"$LAB_OUT/ctld.log" 2>&1 </dev/null &
   echo $! >"$LAB_OUT/ctld.pid"
   local i
   for i in $(seq 1 50); do

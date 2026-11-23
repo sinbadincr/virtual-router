@@ -12,7 +12,7 @@
 #define mac_str ne_mac_str
 #define prefix_str ne_prefix_str
 
-void ne_json(struct jw *w, const struct nentry *e) {
+void ne_json_ex(struct jw *w, const struct nentry *e, const char *owner) {
     char a[20], b[18];
     jw_obj_begin(w, NULL);
     jw_str(w, "kind", ne_kind_name(e->kind));
@@ -59,7 +59,13 @@ void ne_json(struct jw *w, const struct nentry *e) {
         jw_u64(w, "tag", e->tag);
         break;
     }
+    if (owner)
+        jw_str(w, "owner", owner);
     jw_obj_end(w);
+}
+
+void ne_json(struct jw *w, const struct nentry *e) {
+    ne_json_ex(w, e, NULL);
 }
 
 /* ---- parsing helpers ---- */
@@ -256,6 +262,26 @@ static int c_quarantine(struct ctx *c, int argc, char **argv) {
             return 0;
         }
     return cmd_fail(c->err, "table-full", "quarantine table full");
+}
+
+/* state file only: learned node <n> ip <a> rmac <m>  (kept so a controller restart does not
+ * withdraw routes to nodes that have not reconnected yet) */
+static int c_learned(struct ctx *c, int argc, char **argv) {
+    uint32_t ip;
+    uint8_t mac[6];
+    if (argc != 7 || strcmp(argv[1], "node") != 0 || strcmp(argv[3], "ip") != 0 ||
+        strcmp(argv[5], "rmac") != 0)
+        return usage(c, "learned node <n> ip <a.b.c.d> rmac <mac>");
+    int n = cm_node_idx(c->m, argv[2]);
+    if (n < 0)
+        return cmd_fail(c->err, "unknown-node", "no such node '%s'", argv[2]);
+    const char *e;
+    if ((e = cmd_parse_ipv4(argv[4], &ip)))
+        return cmd_fail(c->err, e, "invalid address '%s'", argv[4]);
+    if ((e = cmd_parse_mac(argv[6], mac)))
+        return cmd_fail(c->err, e, "invalid MAC '%s'", argv[6]);
+    cm_node_learn(c->m, (unsigned)n, ip, mac);
+    return 0;
 }
 
 /* ---- show commands ---- */
@@ -527,6 +553,7 @@ static const struct def defs[] = {
     {"vmi show", c_vmi_show, CG_CLI},
     {"bind", c_bind, CG_STATE},
     {"quarantine", c_quarantine, CG_STATE},
+    {"learned", c_learned, CG_STATE},
     {"stats show", c_stats_show, CG_CLI},
     {"version", c_version, CG_CLI},
 };
@@ -675,6 +702,19 @@ int cm_serialize(const struct cmodel *m, char *buf, size_t cap) {
         if (m->nodes[i].used) {
             put(&b, "node add ");
             put(&b, m->nodes[i].name);
+            put(&b, "\n");
+        }
+    for (int i = 0; i < CM_MAX_NODES; i++)
+        if (m->nodes[i].used && m->nodes[i].addr_known) {
+            char a[16], r[18];
+            ip_str(m->nodes[i].underlay_ip, a);
+            mac_str(m->nodes[i].rmac, r);
+            put(&b, "learned node ");
+            put(&b, m->nodes[i].name);
+            put(&b, " ip ");
+            put(&b, a);
+            put(&b, " rmac ");
+            put(&b, r);
             put(&b, "\n");
         }
     for (int i = 0; i < CM_MAX_VMIS; i++) {

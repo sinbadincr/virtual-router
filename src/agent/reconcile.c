@@ -320,9 +320,12 @@ int rc_plan(const struct reconciler *rc, const struct nstate *have, struct rc_cm
     /* 3. adds for keys the forwarder holds for config/cli are conflicts, never commands */
     unsigned nc = 0;
     for (unsigned i = 0; i < d.nadds; i++) {
-        if (ns_get(&rc->foreign, &adds_s[i])) {
-            if (nc < conf_cap)
+        const struct nentry *held = ns_get(&rc->foreign, &adds_s[i]);
+        if (held) {
+            if (nc < conf_cap) {
                 conf[nc].entry = adds_s[i];
+                conf[nc].entry.owner = held->owner; /* who holds the key */
+            }
             nc++;
             mark_add[i] = 0;
         }

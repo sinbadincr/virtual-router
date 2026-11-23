@@ -120,3 +120,38 @@ TEST(state_too_big_for_the_buffer_is_reported) {
     ns_init(&s, tiny, 4);
     CHECK(cm_compute(&cf_m, 0, &s) == -1);
 }
+
+TEST(unbound_vmis_appear_nowhere_and_the_last_unplug_empties_the_node) {
+    CHECK_EQ_U64(cf_load_intent(), 15);
+    cf_phase2_bindings();
+    struct nstate s;
+    ns_init(&s, store, 4096);
+    CHECK(cm_compute(&cf_m, 0, &s) == 0);
+    for (unsigned i = 0; i < s.n; i++) /* red5 is defined but unbound */
+        CHECK(!(s.e[i].kind == NE_ROUTE && s.e[i].prefix == 0x0a01020fu));
+    CHECK(cm_unbind(&cf_m, 0, "red1") == 0);
+    CHECK(cm_unbind(&cf_m, 0, "blue1") == 0);
+    CHECK(cm_compute(&cf_m, 0, &s) == 0);
+    CHECK_EQ_U64(s.n, 0); /* no VRF, VNI, NODE, port or route stays */
+    unsigned l;
+    int from;
+    CHECK(cm_bind(&cf_m, 0, "red1", "red1", &l, &from) == CM_BIND_OK);
+    CHECK(cm_compute(&cf_m, 0, &s) == 0);
+    CHECK(find(&s, NE_VRF, "red", 0) && find(&s, NE_ROUTE, "red", 0x0a01010cu));
+    CHECK(!find(&s, NE_VRF, "blue", 0));
+}
+
+TEST(a_move_drops_the_vmi_from_the_old_node_and_quarantines_its_label) {
+    CHECK_EQ_U64(cf_load_intent(), 15);
+    cf_phase2_bindings();
+    unsigned l;
+    int from;
+    CHECK(cm_bind(&cf_m, 0, "red2", "red2", &l, &from) == CM_BIND_OK);
+    CHECK_EQ_U64(from, 1);
+    struct nstate s;
+    ns_init(&s, store, 4096);
+    CHECK(cm_compute(&cf_m, 1, &s) == 0);
+    CHECK(!find(&s, NE_PORT, "red2", 0));
+    CHECK(find(&s, NE_ROUTE, "red", 0x0a01010cu)); /* cn2 now tunnels red2's address to cn1 */
+    CHECK(cm_label_quarantined(&cf_m, 1, 1000));
+}

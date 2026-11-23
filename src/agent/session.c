@@ -127,7 +127,8 @@ void agent_diff_json(struct jw *w) {
     entries_json(w, "stale", cmds, n, true);
     jw_arr_begin(w, "conflicts");
     for (unsigned i = 0; i < nc; i++) {
-        ne_json(w, &conf[i].entry);
+        static const char *const names[] = {"config", "cli", "agent"};
+        ne_json_ex(w, &conf[i].entry, names[conf[i].entry.owner % 3]);
     }
     jw_arr_end(w);
 }
