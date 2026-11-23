@@ -77,3 +77,72 @@ user in the lab, `nobody` by default; zero capabilities, `no_new_privs`, self-ve
 
 The mapping is the learning goal: VMI = TF virtual-machine-interface, tenant = virtual network
 plus routing instance, node state = what the agent programs into the vrouter.
+
+## Demo (real output, namespace-VM lab)
+
+Captured from `sudo make lab TOPO=ctl && sudo make lab-run` (harness variant; the KVM variant behaves
+the same, the guests just take longer to boot). `vc` = `vrctl -s /run/mvr-ctl/ctld.sock`.
+
+**1. After `lab-run`: two nodes in sync, five VMs bound, two defined but not yet plugged**
+
+```
+$ vc node show
+NODE    UNDERLAY_IP    RMAC               SESSION     IN_SYNC  ENTR  SINCE   LAST_ERROR
+cn1     172.16.0.1     02:00:00:ff:00:01  in-sync     yes      14    0       -
+cn2     172.16.0.2     02:00:00:ff:00:02  in-sync     yes      16    0       -
+cn3     -              -                  none        no       0     0       -
+$ vc vmi show
+VMI       TENANT  IP              MAC                STATE    NODE    PORT      LABEL
+red1      red     10.1.1.11       02:00:00:01:01:11  bound    cn1     red1      1000
+blue1     blue    10.1.1.11       02:00:00:02:01:11  bound    cn1     blue1     1001
+red2      red     10.1.1.12       02:00:00:01:02:12  bound    cn2     red2      1000
+red3      red     10.1.2.13       02:00:00:01:02:13  bound    cn2     red3      1001
+blue2     blue    10.1.1.12       02:00:00:02:02:12  bound    cn2     blue2     1002
+red4      red     10.1.1.14       02:00:00:01:03:14  unbound  -       -         -
+red5      red     10.1.2.15       02:00:00:01:02:15  unbound  -       -         -
+```
+
+**2. A VM boots: `lab.sh guest start red5` plugs it on cn2; cn1 learns the route within a second**
+
+```
+$ v1 route show vrf red                      # before
+VRF       PREFIX          PORT  GATEWAY     ORIGIN    REMOTE  OWNER
+red       10.1.1.0/24     red1  -           connected   agent
+red       10.1.1.11/32    red1  -           host        agent
+red       10.1.1.12/32    -     -           remote    cn2 mplsoudp 1000  agent
+red       10.1.2.13/32    -     -           remote    cn2 mplsoudp 1001  agent
+$ lab/lab.sh guest start red5
+$ v1 route show vrf red                      # after: one new remote route, label 1003 allocated on cn2
+red       10.1.2.15/32    -     -           remote    cn2 mplsoudp 1003  agent
+$ ping -c2 10.1.2.15   (from red1)
+2 packets transmitted, 2 received, 0% packet loss
+```
+
+**3. The controller stops; the agent goes headless, the forwarder keeps every route**
+
+```
+$ lab/lab.sh svc stop ctld
+$ va1 status
+node cn1  sync headless  gen 1
+controller 10.98.0.254:7700  session connecting  since 0s  last_error connect: Connection refused
+forwarder up  boot_id 9aec0d9f8b563dbf  last_error -
+```
+
+The agent retries with backoff (`retry_ms=1000, 2000, 4000, 5000` in its log). A `ping -i 0.1` from
+red1 to red2 runs through the whole outage.
+
+**4. The controller returns; nodes resync, nothing was flushed**
+
+```
+$ lab/lab.sh svc start ctld
+$ vc node show
+cn1     172.16.0.1     02:00:00:ff:00:01  in-sync     yes      15    0       -
+cn2     172.16.0.2     02:00:00:ff:00:02  in-sync     yes      19    2       -
+$ lab/lab.sh ctl-diff; echo $?
+0
+150 packets transmitted, 150 received, 0% packet loss, time 16455ms
+```
+
+The entry counts grew (14 → 15, 16 → 19) because red5 stayed plugged during the outage; the
+controller reloaded its bindings and labels from the state file, so every label is unchanged and no
+route was withdrawn.
