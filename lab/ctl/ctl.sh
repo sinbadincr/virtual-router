@@ -116,8 +116,11 @@ ctl_wait_sync() { # seconds
     for n in "${CTL_NODES[@]}"; do
       [ "$("$VRCTL" -j -s "/run/mvr-$n/agent.sock" status 2>/dev/null | jq -r '.data.sync // "none"')" = in-sync ] || sync=0
     done
-    [ $sync -eq 1 ] && return 0
-    sleep 0.1
+    # in sync as far as the agents know AND the forwarders really hold the intended state
+    if [ $sync -eq 1 ] && python3 "$ROOT/lab/ctl/ctl_diff.py" "$VRCTL" "$CTL_SOCK" /run/mvr >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
   done
   return 1
 }
@@ -125,11 +128,21 @@ ctl_wait_sync() { # seconds
 lab_run_ctl() {
   need_root
   ns_exists mvr-ctl || die "ctl lab is not up (run: sudo make lab TOPO=ctl)"
-  local interop=0
+  local interop=0 only=""
   while [ $# -gt 0 ]; do
-    case "$1" in --interop) interop=1; shift ;; *) die "unknown option $1" ;; esac
+    case "$1" in
+      --interop) interop=1; shift ;;
+      --node) [ $# -ge 2 ] || die "--node needs cn1 or cn2"; only=$2; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
   done
   ctl_bins
+  if [ -n "$only" ]; then # restart one forwarder; its agent reconnects and re-programs it
+    case "$only" in cn1|cn2) ;; *) die "--node must be cn1 or cn2" ;; esac
+    ctl_start_fwd "$only"
+    ctl_wait_sync 15 || echo "warning: agents not in sync after 15s" >&2
+    return 0
+  fi
   rm -rf "$LAB_OUT/ctl"
   ctl_start_ctld
   local n

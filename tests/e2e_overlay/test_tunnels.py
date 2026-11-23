@@ -10,7 +10,7 @@ import time
 import pytest
 
 from capture import Capture, tenant_leaks, tunnel_packets, undecoded_ip
-from conftest import UL_MAC, VARIANT, forwarder_pids, run_lab, v, vc, vm, ns_exec, reasons
+from conftest import LABEL, UL_MAC, VARIANT, forwarder_pids, run_lab, v, vc, vm, ns_exec, reasons
 
 
 def assert_clean_underlay(cap):
@@ -28,8 +28,8 @@ def test_o3_red_across_nodes_uses_mplsoudp(fresh):
     assert pk and all(p["kind"] == "mplsoudp" for p in pk)
     to_cn2 = [p for p in pk if p["dst"] == "172.16.0.2"]
     to_cn1 = [p for p in pk if p["dst"] == "172.16.0.1"]
-    assert {p["label"] for p in to_cn2} == {1012, 1013}
-    assert {p["label"] for p in to_cn1} == {1011}
+    assert {p["label"] for p in to_cn2} == {LABEL["red2"], LABEL["red3"]}
+    assert {p["label"] for p in to_cn1} == {LABEL["red1"]}
     for p in pk:
         assert p["s"] == 1 and p["df"] and p["ttl_outer"] == 64
         assert 49152 <= p["sport"] <= 65535

@@ -19,6 +19,17 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 VARIANT = os.environ.get("MINIVR_LAB_VARIANT", "harness")
 assert VARIANT in ("harness", "kvm"), "MINIVR_LAB_VARIANT must be harness or kvm"
+# overlay (default): static per-node configs; ctl: the same lab driven by controller + agents
+TOPO = os.environ.get("MINIVR_OVERLAY_TOPO", "overlay")
+assert TOPO in ("overlay", "ctl"), "MINIVR_OVERLAY_TOPO must be overlay or ctl"
+# tests about static config contents or the overlay lab's own lifecycle do not apply to the ctl lab
+CTL_SKIP_FILES = ("test_cli_overlay.py", "test_overlay_lab.py", "test_overlay_lifecycle.py",
+                  "test_interop.py")
+# tests that rewrite forwarder tables by hand: the agent would (rightly) put them back
+CTL_SKIP_TESTS = ("test_o8_live_reencapsulation_within_one_second",
+                  "test_sc005_remote_route_delete_and_add_take_effect_within_one_second",
+                  "test_sc002_thousand_pings_every_pair_with_each_encapsulation",
+                  "test_us3_5_a_route_added_in_red_exists_only_in_red")
 BUDGET_S = int(os.environ.get("MINIVR_E2E_OVERLAY_BUDGET_S", "300" if VARIANT == "harness" else "600"))
 LAB = ROOT / "lab" / "lab.sh"
 BUILD = os.environ.get("MINIVR_BUILD", "debug")
@@ -45,9 +56,26 @@ _session_start = time.monotonic()
 _prereq = {"rc": 0, "msg": ""}
 
 
+# MPLS labels of the shipped lab: fixed by lab/overlay/*.conf, or allocated by the controller
+LABEL = {"red1": 1011, "red2": 1012, "red3": 1013}
+
+
+def refresh_labels():
+    """Under the ctl topology read the labels the controller allocated; export them to the
+    injector processes (underlay_corpus.py reads MINIVR_LABEL_*)."""
+    if TOPO == "ctl":
+        r = subprocess.run([str(VRCTL_BIN), "-s", "/run/mvr-ctl/ctld.sock", "-j", "vmi", "show"],
+                           capture_output=True, text=True)
+        for x in json.loads(r.stdout)["data"]["vmis"]:
+            if x["name"] in LABEL and x["label"] is not None:
+                LABEL[x["name"]] = x["label"]
+    os.environ["MINIVR_LABEL_RED2"] = str(LABEL["red2"])
+    os.environ["MINIVR_LABEL_RED3"] = str(LABEL["red3"])
+
+
 def lab_args(*extra):
     """`up` arguments for the overlay lab of this variant."""
-    return ["up", "--topo", "overlay"] + (["--harness"] if VARIANT == "harness" else []) + list(extra)
+    return ["up", "--topo", TOPO] + (["--harness"] if VARIANT == "harness" else []) + list(extra)
 
 
 def run_lab(*args, env=None, timeout=300):
@@ -62,6 +90,11 @@ def mvr_ns():
 
 
 def pytest_collection_modifyitems(config, items):
+    if TOPO == "ctl":
+        why = pytest.mark.skip(reason="not applicable to the controller-driven lab (FR-028)")
+        for item in items:
+            if item.fspath.basename in CTL_SKIP_FILES or item.name.split("[")[0] in CTL_SKIP_TESTS:
+                item.add_marker(why)
     if os.geteuid() != 0:
         skip = pytest.mark.skip(reason="overlay e2e needs root: run with sudo")
         for item in items:
@@ -142,6 +175,7 @@ def fresh(overlay_lab):
     """Both forwarders freshly started with the shipped configs (zeroed counters and tables)."""
     r = run_lab("run")
     assert r.returncode == 0, r.stderr
+    refresh_labels()
     yield forwarder_pids()
 
 
@@ -213,4 +247,5 @@ def forwarders(overlay_lab):
     """Fresh minivrd on both nodes with the shipped lab/overlay configs."""
     r = run_lab("run")
     assert r.returncode == 0, r.stderr
+    refresh_labels()
     yield forwarder_pids()

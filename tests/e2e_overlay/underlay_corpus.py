@@ -17,7 +17,9 @@ INJ_MAC = "02:00:00:ff:00:09"
 INJ_IP = "172.16.0.9"
 NODES = {"cn1": ("02:00:00:ff:00:01", "172.16.0.1"), "cn2": ("02:00:00:ff:00:02", "172.16.0.2")}
 # receive mappings of lab/overlay/cn2.conf
-LABEL_RED2, LABEL_RED3, VNI_BLUE = 1012, 1013, 200
+VNI_BLUE = 200
+LABEL_RED2 = int(__import__("os").environ.get("MINIVR_LABEL_RED2", "1012"))
+LABEL_RED3 = int(__import__("os").environ.get("MINIVR_LABEL_RED3", "1013"))
 IPV4, ARP = 0x0800, 0x0806
 
 
