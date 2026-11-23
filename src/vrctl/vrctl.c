@@ -23,6 +23,11 @@ static const char *const known[] = {
     "version", "debug crash",
     "vrf add", "vrf del", "vrf show", "underlay add", "node add", "node set", "node del",
     "node show", "route replace", "label add", "label del", "vni add", "vni del", "tunnel show",
+    /* phase 3: forwarder additions, controller and agent commands (the daemon validates them) */
+    "port del", "session show",
+    "tenant add", "tenant set", "tenant del", "tenant show", "subnet add", "subnet del",
+    "node forget", "node state", "vmi add", "vmi del", "vmi show",
+    "plug", "unplug", "status", "bindings show", "want show", "diff show",
 };
 
 static int is_known(const char *w0, const char *w1) {
@@ -104,6 +109,7 @@ static int request(int fd, const char *cmd, char **resp, size_t *rlen) {
 }
 
 static int g_continuation; /* later pages of one listing: no repeated header */
+static char g_daemon[24] = "minivrd"; /* from the version handshake */
 static int g_owner;        /* show the OWNER column: some row is not owned by `config` */
 
 static void hdr_end(void) {
@@ -289,6 +295,44 @@ static void render_table(const char *cmd, const struct jnode *d) {
                    ports[0] ? ports : "-", uval(r, "routes"), uval(r, "neighbours"),
                    uval(r, "labels"), uval(r, "vnis"));
             row_end(r);
+        }
+    } else if (strcmp(cmd, "node show") == 0 && strcmp(g_daemon, "minivr-ctld") == 0) {
+        printf("%-8s%-15s%-19s%-12s%-9s%-6s%-8s%s\n", "NODE", "UNDERLAY_IP", "RMAC", "SESSION",
+               "IN_SYNC", "ENTR", "SINCE", "LAST_ERROR");
+        const struct jnode *list = json_get(d, "nodes");
+        for (const struct jnode *r = list ? list->child : NULL; r; r = r->next) {
+            const struct jnode *se = json_get(r, "session");
+            const struct jnode *ins = json_get(r, "in_sync");
+            printf("%-8s%-15s%-19s%-12s%-9s%-6llu%-8llu%s\n", sval(r, "name", "?"),
+                   sval(r, "underlay_ip", "-"), sval(r, "rmac", "-"), sval(se, "state", "?"),
+                   ins && ins->b ? "yes" : "no", uval(r, "entries"), uval(se, "since"),
+                   sval(se, "last_error", "-"));
+        }
+    } else if (strcmp(cmd, "vmi show") == 0) {
+        printf("%-10s%-8s%-16s%-19s%-9s%-8s%-10s%s\n", "VMI", "TENANT", "IP", "MAC", "STATE", "NODE",
+               "PORT", "LABEL");
+        const struct jnode *list = json_get(d, "vmis");
+        for (const struct jnode *r = list ? list->child : NULL; r; r = r->next) {
+            const struct jnode *l = json_get(r, "label");
+            char lb[12] = "-";
+            if (l && l->type == J_NUM)
+                snprintf(lb, sizeof lb, "%llu", (unsigned long long)l->u);
+            printf("%-10s%-8s%-16s%-19s%-9s%-8s%-10s%s\n", sval(r, "name", "?"), sval(r, "tenant", "?"),
+                   sval(r, "ip", "?"), sval(r, "mac", "?"), sval(r, "state", "?"), sval(r, "node", "-"),
+                   sval(r, "port", "-"), lb);
+        }
+    } else if (strcmp(cmd, "tenant show") == 0) {
+        printf("%-10s%-4s%-10s%-10s%-6s%s\n", "TENANT", "ID", "VNI", "ENCAP", "VMIS", "NODES");
+        const struct jnode *list = json_get(d, "tenants");
+        for (const struct jnode *r = list ? list->child : NULL; r; r = r->next) {
+            char nodes[64] = "";
+            const struct jnode *nl = json_get(r, "nodes");
+            for (const struct jnode *p = nl ? nl->child : NULL; p; p = p->next) {
+                size_t l = strlen(nodes);
+                snprintf(nodes + l, sizeof nodes - l, "%s%s", l ? "," : "", p->str ? p->str : "?");
+            }
+            printf("%-10s%-4llu%-10llu%-10s%-6llu%s\n", sval(r, "name", "?"), uval(r, "id"),
+                   uval(r, "vni"), sval(r, "encap", "?"), uval(r, "vmis"), nodes[0] ? nodes : "-");
         }
     } else if (strcmp(cmd, "node show") == 0) {
         const struct jnode *list = json_get(d, "nodes");
@@ -476,6 +520,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "vrctl: forwarder refused the connection: %s: %s\n",
                 code && code->str ? code->str : "error", msg && msg->str ? msg->str : "");
         return EXIT_UNREACHABLE;
+    }
+    {
+        const struct jnode *dm = json_get(json_get(root, "data"), "daemon");
+        if (dm && dm->str)
+            snprintf(g_daemon, sizeof g_daemon, "%.23s", dm->str);
     }
     const struct jnode *proto = json_get(json_get(root, "data"), "protocol");
     if (!proto || !proto->is_int || proto->u != PROTOCOL) {

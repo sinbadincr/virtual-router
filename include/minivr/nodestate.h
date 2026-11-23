@@ -25,6 +25,7 @@ struct nentry {
     uint8_t id;
     uint8_t plen;
     uint8_t encap;
+    uint8_t owner; /* enum owner of the forwarder entry this was read from (agent only; not compared) */
     uint32_t vni;
     uint32_t ip;
     uint32_t prefix;
